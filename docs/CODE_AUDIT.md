@@ -3,7 +3,8 @@
 Version: 1
 Date: 2026
 Scope: `src/common/*`, `src/server/main.c`, `src/client/main.c`
-Reviewer: internal (author + AI)
+Reviewer: project author
+Additional review: AI-assisted
 Method: manual source review
 
 This document is an honest engineering review, not a marketing document.

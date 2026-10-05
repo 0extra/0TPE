@@ -137,3 +137,25 @@ int otpe_tls_get_fd(otpe_tls_t* t) {
 int otpe_tls_pending(otpe_tls_t* t) {
     return SSL_pending(t->ssl);
 }
+
+ssize_t otpe_tls_send_all(otpe_tls_t* t, const void* buf, size_t len) {
+    const uint8_t* p = (const uint8_t*)buf;
+    size_t sent = 0;
+    while (sent < len) {
+        int w = SSL_write(t->ssl, p + sent, (int)(len - sent));
+        if (w <= 0) return -1;
+        sent += (size_t)w;
+    }
+    return (ssize_t)sent;
+}
+
+ssize_t otpe_tls_recv_all(otpe_tls_t* t, void* buf, size_t len) {
+    uint8_t* p = (uint8_t*)buf;
+    size_t got = 0;
+    while (got < len) {
+        int r = SSL_read(t->ssl, p + got, (int)(len - got));
+        if (r <= 0) return -1;
+        got += (size_t)r;
+    }
+    return (ssize_t)got;
+}

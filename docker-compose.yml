@@ -1,0 +1,15 @@
+services:
+  otpe:
+    build: .
+    image: 0tpe:latest
+    container_name: otpe-server
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    volumes:
+      - ./certs:/app/certs:ro
+      - ./keys:/app/keys:ro
+      - ./0tpe.conf:/app/0tpe.conf:ro
+    read_only: true
+    tmpfs:
+      - /tmp

@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 #include "uri.h"
 #include "config.h"
 
@@ -28,10 +27,10 @@ int main(int argc, char** argv) {
     otpe_uri_t u;
     memset(&u, 0, sizeof(u));
     config_token_to_bytes(ccfg.token, u.token, OTPE_TOKEN_SIZE);
-    strncpy(u.host, ccfg.server_ip, sizeof(u.host) - 1);
+    snprintf(u.host, sizeof(u.host), "%s", ccfg.server_ip);
     u.port = ccfg.server_port;
-    strncpy(u.sni, ccfg.sni, sizeof(u.sni) - 1);
-    strncpy(u.name, name, sizeof(u.name) - 1);
+    snprintf(u.sni, sizeof(u.sni), "%s", ccfg.sni);
+    snprintf(u.name, sizeof(u.name), "%s", name);
 
     char buf[URI_MAX];
     if (uri_generate(&u, buf, sizeof(buf)) < 0) {

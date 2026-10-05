@@ -123,7 +123,7 @@ static void handle_udp_frame(otpe_tls_t* tls, const uint8_t* token,
                 memcpy(out + op, reply, (size_t)rn);
                 op += (size_t)rn;
 
-                otpe_tls_send(tls, out, op);
+                otpe_tls_send_all(tls, out, op);
             }
         }
     }
@@ -182,7 +182,7 @@ static void handle_client(int client) {
             reply.checksum = 0;
             uint8_t out[OTPE_HEADER_SIZE];
             otpe_encode_header(&reply, out, sizeof(out));
-            if (otpe_tls_send(tls, out, OTPE_HEADER_SIZE) <= 0) break;
+            if (otpe_tls_send_all(tls, out, OTPE_HEADER_SIZE) <= 0) break;
             continue;
         }
 

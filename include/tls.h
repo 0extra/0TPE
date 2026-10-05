@@ -12,6 +12,8 @@ void        otpe_tls_free(otpe_tls_t* t);
 
 ssize_t otpe_tls_send(otpe_tls_t* t, const void* buf, size_t len);
 ssize_t otpe_tls_recv(otpe_tls_t* t, void* buf, size_t len);
+ssize_t otpe_tls_send_all(otpe_tls_t* t, const void* buf, size_t len);
+ssize_t otpe_tls_recv_all(otpe_tls_t* t, void* buf, size_t len);
 
 int otpe_tls_get_fd(otpe_tls_t* t);
 int otpe_tls_pending(otpe_tls_t* t);

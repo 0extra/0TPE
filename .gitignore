@@ -9,11 +9,12 @@ otpe-test-crypto
 otpe-test-udp
 bench-rtt
 bench-throughput
-fuzz/fuzz_clienthello
+!fuzz/fuzz_clienthello
 fuzz/corpus/*
 !fuzz/corpus/.gitkeep
 certs/
 keys/
+dist/
 *.pcap
 .vscode/
-*.swp
+*.swpdist/

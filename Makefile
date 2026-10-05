@@ -47,13 +47,19 @@ bench-throughput: $(SRC_BENCH_THROUGHPUT)
 
 bench: bench-rtt bench-throughput
 
+release: all bench
+	@echo "Building release binaries (stripped)..."
+	strip --strip-all otpe-server otpe-client otpe-genlink otpe-ping bench-rtt bench-throughput
+	@echo "Done. Binaries:"
+	@ls -la otpe-server otpe-client otpe-genlink otpe-ping bench-rtt bench-throughput
+
 fuzz: fuzz/fuzz_clienthello.c src/common/tls_peek.c
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o fuzz/fuzz_clienthello fuzz/fuzz_clienthello.c src/common/tls_peek.c
 
 fuzz-run: fuzz
 	mkdir -p fuzz/corpus
 	./fuzz/fuzz_clienthello fuzz/corpus -max_total_time=300
-	
+
 clean:
 	rm -f otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-crypto otpe-test-udp bench-rtt bench-throughput fuzz/fuzz_clienthello
 
@@ -61,4 +67,4 @@ fuzz-clean:
 	rm -f fuzz/fuzz_clienthello
 	rm -rf fuzz/corpus
 
-.PHONY: all clean fuzz fuzz-run fuzz-clean bench
+.PHONY: all clean fuzz fuzz-run fuzz-clean bench release

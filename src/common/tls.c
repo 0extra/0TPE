@@ -130,14 +130,6 @@ ssize_t otpe_tls_recv(otpe_tls_t* t, void* buf, size_t len) {
     return SSL_read(t->ssl, buf, (int)len);
 }
 
-int otpe_tls_get_fd(otpe_tls_t* t) {
-    return SSL_get_fd(t->ssl);
-}
-
-int otpe_tls_pending(otpe_tls_t* t) {
-    return SSL_pending(t->ssl);
-}
-
 ssize_t otpe_tls_send_all(otpe_tls_t* t, const void* buf, size_t len) {
     const uint8_t* p = (const uint8_t*)buf;
     size_t sent = 0;
@@ -158,4 +150,12 @@ ssize_t otpe_tls_recv_all(otpe_tls_t* t, void* buf, size_t len) {
         got += (size_t)r;
     }
     return (ssize_t)got;
+}
+
+int otpe_tls_get_fd(otpe_tls_t* t) {
+    return SSL_get_fd(t->ssl);
+}
+
+int otpe_tls_pending(otpe_tls_t* t) {
+    return SSL_pending(t->ssl);
 }

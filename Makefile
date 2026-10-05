@@ -51,8 +51,9 @@ fuzz: fuzz/fuzz_clienthello.c src/common/tls_peek.c
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o fuzz/fuzz_clienthello fuzz/fuzz_clienthello.c src/common/tls_peek.c
 
 fuzz-run: fuzz
+	mkdir -p fuzz/corpus
 	./fuzz/fuzz_clienthello fuzz/corpus -max_total_time=300
-
+	
 clean:
 	rm -f otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-crypto otpe-test-udp bench-rtt bench-throughput fuzz/fuzz_clienthello
 

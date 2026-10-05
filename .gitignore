@@ -5,7 +5,8 @@ otpe-ping
 otpe-test
 otpe-test-crypto
 fuzz/fuzz_clienthello
-fuzz/corpus/
+fuzz/corpus/*
+!fuzz/corpus/.gitkeep
 certs/
 keys/
 *.pcap

@@ -1,6 +1,6 @@
-# 0TPE — Zero Transfer Protocol Extra
+# 0TPE
 
-A custom proxy protocol on top of TLS with camouflage to a real website (Reality-compatible).
+A lightweight transport protocol over TLS with camouflage to a real website.
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![build](https://github.com/0extra/0TPE/actions/workflows/build.yml/badge.svg)](https://github.com/0extra/0TPE/actions/workflows/build.yml)
@@ -8,14 +8,22 @@ A custom proxy protocol on top of TLS with camouflage to a real website (Reality
 
 ## What it is
 
-0TPE is a protocol for bypassing DPI and censorship. From the outside, traffic looks like a normal HTTPS session to a well-known site (default: `www.microsoft.com`). Active probing — when a censor connects to your server as a regular client — receives the **real response from Microsoft**. Impersonation is impossible.
+0TPE is a lightweight transport protocol for building secure proxy tunnels. It runs on top of TLS and uses an active-probing defense mechanism — from the outside, traffic looks like a normal HTTPS session to a well-known site (default: `www.microsoft.com`). An outside observer probing the server receives the **real response from Microsoft**, so the protocol cannot be distinguished from a legitimate mirror.
+
+## Use cases
+
+- **Privacy on untrusted networks** — public Wi-Fi, hotels, airports, corporate networks
+- **Remote access** — reach your home or office network from anywhere
+- **Geo-restrictions** — access streaming services and websites as if you were in another country
+- **Development and testing** — view your services from different regions
+- **Secure tunneling between your own devices** — connect your laptop to your home server
 
 ## Features
 
 - Custom transport protocol with a minimal **16-byte header**
 - TLS wrapper on top of OpenSSL
 - X25519-encrypted handshake — only a matching client is recognized by the server
-- Fallback: foreign connections are transparently proxied to a real decoy site
+- Transparent fallback: unrecognized connections are proxied to a real decoy site
 - Anti-replay: HMAC with timestamp ±30s + in-memory nonce cache (4096 entries, 60s window)
 - SOCKS5 (TCP + UDP ASSOCIATE) and HTTP CONNECT on the client
 - Multi-client server and client (pthreads, no thread count limit)
@@ -65,11 +73,11 @@ Real-world performance through the SOCKS5 proxy:
 
 | Scenario | Wall clock |
 |---|---|
-| 1 curl to wikipedia.org | 0.6 s |
+| 1 curl to a target site | 0.6 s |
 | 3 parallel curls | 1.6 s |
-| 20 parallel curls | ~11 s (limited by upstream anti-bot, not by 0TPE) |
+| 20 parallel curls | ~11 s (limited by upstream server, not by 0TPE) |
 
-With 20 parallel requests, ~14–18 succeed within 1 second. The remaining connections get stuck waiting for the upstream server's TLS handshake; our **10-second idle timeout** kills them, so the whole test completes in 11 seconds instead of 121.
+With 20 parallel requests, ~14–18 succeed within 1 second. The remaining connections wait for the upstream server's TLS handshake; our **10-second idle timeout** cleans them up, so the whole test completes in 11 seconds instead of 121.
 
 ## Dependencies
 
@@ -109,7 +117,7 @@ sudo apk add build-base openssl-dev
 chmod +x scripts/gen_cert.sh
 ./scripts/gen_cert.sh
 
-# 2. Generate X25519 keys for Reality-lite
+# 2. Generate X25519 keys
 chmod +x scripts/gen_keys.sh
 ./scripts/gen_keys.sh
 
@@ -168,7 +176,7 @@ docker compose up -d
 docker compose logs -f
 ```
 
-**Don't forget** to copy `keys/server.pub` to the client machine — it is needed for the Reality-lite handshake.
+**Don't forget** to copy `keys/server.pub` to the client machine — it is needed for the handshake.
 
 ## Opening the port on the VPS
 
@@ -331,7 +339,7 @@ make bench
 3. The server reads the ClientHello **before** the TLS handshake via `MSG_PEEK` and verifies the HMAC
 4. If HMAC matches → the server acts as a 0TPE server
 5. If not → the server **transparently proxies** the connection to the real `www.microsoft.com:443`
-6. The censor sees a real TLS session, real certificate, real response — impersonation is impossible
+6. An outside observer sees a real TLS session, a real certificate, a real response — nothing distinguishes it from a legitimate mirror
 
 ## Security
 
@@ -342,7 +350,7 @@ make bench
 
 ## Limitations
 
-- Against a **targeted** DPI with Chrome fingerprinting (e.g., Russian RKN with active analysis) it may not work — OpenSSL cannot fully reproduce Chrome's ClientHello. Requires BoringSSL or uTLS.
+- Against a **targeted** DPI with Chrome fingerprinting it may not work — OpenSSL cannot fully reproduce Chrome's ClientHello. Requires BoringSSL or uTLS.
 - No multiplexing — each connection is a new TLS session. Attempts to implement MUX over OpenSSL failed (see `docs/CODE_AUDIT.md`).
 - UDP relay is stateless per datagram — long-lived UDP flows (QUIC, VoIP) may not work efficiently.
 - Idle timeout is 10 seconds: some applications that hold idle connections (push notifications, keep-alives) will see them dropped and reconnect.
@@ -373,7 +381,7 @@ issuer=C=US, O=Microsoft Corporation, CN=Microsoft TLS G2 RSA CA OCSP 04
 
 - `[tid ...] OTPE client, SNI=...` — our client recognized
 - `[UDP tid ...] -> 8.8.8.8:53 (29 bytes)` — UDP relay working
-- `[fallback] -> www.microsoft.com:443` — foreign connection redirected to fallback
+- `[fallback] -> www.microsoft.com:443` — unrecognized connection redirected to fallback
 - `[relay] idle timeout (10009 ms no data)` — stuck connection cleaned up (normal)
 
 ## Project structure
@@ -400,6 +408,10 @@ README.md
 LICENSE
 COPYING
 ```
+
+## Name
+
+**0TPE** is a short, unique name. No expansion — it's just the project's identifier. The leading `0` comes from the author's handle `0extra`.
 
 ## License
 

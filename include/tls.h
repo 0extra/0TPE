@@ -10,6 +10,8 @@ otpe_tls_t* otpe_tls_server(int fd, const char* cert_file, const char* key_file)
 otpe_tls_t* otpe_tls_client(int fd, const char* sni);
 void        otpe_tls_free(otpe_tls_t* t);
 
+void        otpe_tls_server_preinit(const char* cert_file, const char* key_file);
+
 ssize_t otpe_tls_send(otpe_tls_t* t, const void* buf, size_t len);
 ssize_t otpe_tls_recv(otpe_tls_t* t, void* buf, size_t len);
 ssize_t otpe_tls_send_all(otpe_tls_t* t, const void* buf, size_t len);

@@ -17,6 +17,7 @@
 #include "crypto.h"
 #include "config.h"
 #include "nonce_cache.h"
+#include "dns_cache.h"
 
 static otpe_server_config_t g_cfg;
 static void* g_server_privkey = NULL;
@@ -55,14 +56,9 @@ static void handle_udp_frame(otpe_tls_t* tls, const uint8_t* token,
     if (p + dlen > payload_len) return;
     const uint8_t* data = payload + p;
 
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_DGRAM;
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", port);
-    struct addrinfo* res = NULL;
-    if (getaddrinfo(host, port_str, &hints, &res) != 0) return;
+    struct addrinfo* res = dns_cache_lookup(host, port, SOCK_DGRAM);
+    if (!res) return;
+
     int fd = -1;
     for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
         fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
@@ -70,7 +66,6 @@ static void handle_udp_frame(otpe_tls_t* tls, const uint8_t* token,
         if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
         close(fd); fd = -1;
     }
-    freeaddrinfo(res);
     if (fd < 0) return;
     if (send(fd, data, dlen, 0) != (ssize_t)dlen) { close(fd); return; }
     struct pollfd pfd = { .fd = fd, .events = POLLIN };
@@ -219,7 +214,9 @@ int main(int argc, char** argv) {
     }
     signal(SIGPIPE, SIG_IGN);
     otpe_tls_init();
+    otpe_tls_server_preinit(g_cfg.cert_file, g_cfg.key_file);
     nonce_cache_init();
+    dns_cache_init();
 
     if (crypto_load_private_key(g_cfg.reality_key_file, &g_server_privkey) != 0) {
         printf("Warning: cannot load reality key %s\n", g_cfg.reality_key_file);

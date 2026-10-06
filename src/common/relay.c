@@ -1,39 +1,63 @@
 #include "relay.h"
+#include "dns_cache.h"
 #include <unistd.h>
 #include <poll.h>
 #include <errno.h>
 #include <string.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <time.h>
 #include <netdb.h>
-#include <pthread.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
-static pthread_mutex_t g_gai_lock = PTHREAD_MUTEX_INITIALIZER;
+#define RELAY_IDLE_TIMEOUT_MS 10000
+#define RELAY_GRACE_TIMEOUT_MS 5000
 
 int otpe_set_tcp_nodelay(int fd) {
     int flag = 1;
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
 }
 
+static long elapsed_ms_since(struct timespec* start) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (now.tv_sec - start->tv_sec) * 1000 +
+           (now.tv_nsec - start->tv_nsec) / 1000000;
+}
+
 long otpe_relay_bidirectional(int fd_a, int fd_b) {
     struct pollfd fds[2];
-    fds[0].fd = fd_a;
-    fds[0].events = POLLIN;
-    fds[1].fd = fd_b;
-    fds[1].events = POLLIN;
-
     unsigned char buf[65536];
     long total = 0;
     int a_closed = 0, b_closed = 0;
+    struct timespec last_activity;
+    struct timespec grace_start = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &last_activity);
 
     while (!a_closed || !b_closed) {
+        fds[0].fd = fd_a;
         fds[0].events = a_closed ? 0 : POLLIN;
+        fds[1].fd = fd_b;
         fds[1].events = b_closed ? 0 : POLLIN;
 
-        int ready = poll(fds, 2, -1);
+        int timeout_ms;
+        if (a_closed || b_closed) {
+            if (grace_start.tv_sec == 0) clock_gettime(CLOCK_MONOTONIC, &grace_start);
+            long elapsed = elapsed_ms_since(&grace_start);
+            if (elapsed >= RELAY_GRACE_TIMEOUT_MS) break;
+            timeout_ms = RELAY_GRACE_TIMEOUT_MS - (int)elapsed;
+        } else {
+            long idle = elapsed_ms_since(&last_activity);
+            if (idle >= RELAY_IDLE_TIMEOUT_MS) {
+                fprintf(stderr, "[relay] idle timeout (%ld ms no data)\n", idle);
+                break;
+            }
+            timeout_ms = RELAY_IDLE_TIMEOUT_MS - (int)idle;
+        }
+
+        int ready = poll(fds, 2, timeout_ms);
         if (ready < 0) {
             if (errno == EINTR) continue;
             break;
@@ -46,6 +70,7 @@ long otpe_relay_bidirectional(int fd_a, int fd_b) {
                 a_closed = 1;
                 shutdown(fd_b, SHUT_WR);
             } else {
+                clock_gettime(CLOCK_MONOTONIC, &last_activity);
                 ssize_t sent = 0;
                 while (sent < n) {
                     ssize_t w = send(fd_b, buf + sent, (size_t)(n - sent), MSG_NOSIGNAL);
@@ -62,6 +87,7 @@ long otpe_relay_bidirectional(int fd_a, int fd_b) {
                 b_closed = 1;
                 shutdown(fd_a, SHUT_WR);
             } else {
+                clock_gettime(CLOCK_MONOTONIC, &last_activity);
                 ssize_t sent = 0;
                 while (sent < n) {
                     ssize_t w = send(fd_a, buf + sent, (size_t)(n - sent), MSG_NOSIGNAL);
@@ -82,6 +108,9 @@ long otpe_relay_tls_bidirectional(otpe_tls_t* tls, int raw_fd) {
     unsigned char buf[65536];
     long total = 0;
     int tls_closed = 0, raw_closed = 0;
+    struct timespec last_activity;
+    struct timespec grace_start = {0, 0};
+    clock_gettime(CLOCK_MONOTONIC, &last_activity);
 
     while (!tls_closed || !raw_closed) {
         struct pollfd fds[2];
@@ -90,7 +119,22 @@ long otpe_relay_tls_bidirectional(otpe_tls_t* tls, int raw_fd) {
         fds[1].fd = raw_fd;
         fds[1].events = raw_closed ? 0 : POLLIN;
 
-        int ready = poll(fds, 2, -1);
+        int timeout_ms;
+        if (tls_closed || raw_closed) {
+            if (grace_start.tv_sec == 0) clock_gettime(CLOCK_MONOTONIC, &grace_start);
+            long elapsed = elapsed_ms_since(&grace_start);
+            if (elapsed >= RELAY_GRACE_TIMEOUT_MS) break;
+            timeout_ms = RELAY_GRACE_TIMEOUT_MS - (int)elapsed;
+        } else {
+            long idle = elapsed_ms_since(&last_activity);
+            if (idle >= RELAY_IDLE_TIMEOUT_MS) {
+                fprintf(stderr, "[relay] idle timeout (%ld ms no data)\n", idle);
+                break;
+            }
+            timeout_ms = RELAY_IDLE_TIMEOUT_MS - (int)idle;
+        }
+
+        int ready = poll(fds, 2, timeout_ms);
         if (ready < 0) {
             if (errno == EINTR) continue;
             break;
@@ -103,6 +147,7 @@ long otpe_relay_tls_bidirectional(otpe_tls_t* tls, int raw_fd) {
                 tls_closed = 1;
                 shutdown(raw_fd, SHUT_WR);
             } else {
+                clock_gettime(CLOCK_MONOTONIC, &last_activity);
                 ssize_t sent = 0;
                 while (sent < n) {
                     ssize_t w = send(raw_fd, buf + sent, (size_t)(n - sent), MSG_NOSIGNAL);
@@ -117,9 +162,8 @@ long otpe_relay_tls_bidirectional(otpe_tls_t* tls, int raw_fd) {
             ssize_t n = recv(raw_fd, buf, sizeof(buf), 0);
             if (n <= 0) {
                 raw_closed = 1;
-                /* SSL_shutdown отправит close_notify, но не закроет TCP — это правильно */
-                break;
             } else {
+                clock_gettime(CLOCK_MONOTONIC, &last_activity);
                 ssize_t sent = 0;
                 while (sent < n) {
                     ssize_t w = otpe_tls_send(tls, buf + sent, (size_t)(n - sent));
@@ -168,39 +212,23 @@ static int try_connect_one(struct addrinfo* p, int timeout_ms) {
 }
 
 int otpe_connect_timeout(const char* host, uint16_t port, int timeout_ms) {
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-
-    char port_str[8];
-    snprintf(port_str, sizeof(port_str), "%u", port);
-
-    struct addrinfo* res = NULL;
-
-    pthread_mutex_lock(&g_gai_lock);
-    int gai_rc = getaddrinfo(host, port_str, &hints, &res);
-    pthread_mutex_unlock(&g_gai_lock);
-
-    if (gai_rc != 0) return -1;
+    struct addrinfo* res = dns_cache_lookup(host, port, SOCK_STREAM);
+    if (!res) return -1;
 
     int fd = -1;
-    int v6_timeout = timeout_ms < 2000 ? timeout_ms : 2000;
+    int v6_timeout = 300;
 
     for (struct addrinfo* p = res; p; p = p->ai_next) {
         if (p->ai_family != AF_INET) continue;
-        fd = try_connect_one(p, timeout_ms);
+        fd = try_connect_one(p, 500);
+        if (fd >= 0) return fd;
+    }
+
+    for (struct addrinfo* p = res; p; p = p->ai_next) {
+        if (p->ai_family != AF_INET6) continue;
+        fd = try_connect_one(p, v6_timeout);
         if (fd >= 0) break;
     }
 
-    if (fd < 0) {
-        for (struct addrinfo* p = res; p; p = p->ai_next) {
-            if (p->ai_family != AF_INET6) continue;
-            fd = try_connect_one(p, v6_timeout);
-            if (fd >= 0) break;
-        }
-    }
-
-    freeaddrinfo(res);
     return fd;
 }

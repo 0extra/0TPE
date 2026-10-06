@@ -5,7 +5,7 @@ LDFLAGS = -lssl -lcrypto -lpthread
 FUZZ_CC = clang
 FUZZ_CFLAGS = -fsanitize=fuzzer,address,undefined -Iinclude -g -O1
 
-SRC_COMMON = src/common/protocol.c src/common/relay.c src/common/tls.c src/common/socks5.c src/common/config.c src/common/http_proxy.c src/common/tls_peek.c src/common/crypto.c src/common/nonce_cache.c src/common/uri.c
+SRC_COMMON = src/common/protocol.c src/common/relay.c src/common/tls.c src/common/socks5.c src/common/config.c src/common/http_proxy.c src/common/tls_peek.c src/common/crypto.c src/common/nonce_cache.c src/common/uri.c src/common/dns_cache.c
 SRC_SERVER = src/server/main.c $(SRC_COMMON)
 SRC_CLIENT = src/client/main.c $(SRC_COMMON)
 SRC_PING   = src/ping/main.c   $(SRC_COMMON)

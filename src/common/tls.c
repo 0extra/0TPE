@@ -3,6 +3,8 @@
 #include "crypto.h"
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -11,6 +13,7 @@
 struct otpe_tls {
     SSL_CTX* ctx;
     SSL*     ssl;
+    int      owns_ctx;
 };
 
 static pthread_once_t ssl_once = PTHREAD_ONCE_INIT;
@@ -46,30 +49,64 @@ static int otpe_ext_add_cb(SSL *s, unsigned int ext_type, unsigned int context,
     return 1;
 }
 
+static SSL_CTX* g_server_ctx = NULL;
+static pthread_mutex_t g_server_ctx_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void otpe_tls_server_preinit(const char* cert_file, const char* key_file) {
+    ensure_openssl();
+    pthread_mutex_lock(&g_server_ctx_lock);
+    if (g_server_ctx) {
+        pthread_mutex_unlock(&g_server_ctx_lock);
+        return;
+    }
+
+    SSL_CTX* ctx = SSL_CTX_new(TLS_server_method());
+    if (!ctx) {
+        pthread_mutex_unlock(&g_server_ctx_lock);
+        return;
+    }
+
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
+
+    if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) != 1 ||
+        SSL_CTX_use_PrivateKey_file(ctx, key_file, SSL_FILETYPE_PEM) != 1) {
+        SSL_CTX_free(ctx);
+        pthread_mutex_unlock(&g_server_ctx_lock);
+        return;
+    }
+
+    g_server_ctx = ctx;
+    pthread_mutex_unlock(&g_server_ctx_lock);
+}
+
 otpe_tls_t* otpe_tls_server(int fd, const char* cert_file, const char* key_file) {
     ensure_openssl();
+
+    pthread_mutex_lock(&g_server_ctx_lock);
+    if (!g_server_ctx) {
+        pthread_mutex_unlock(&g_server_ctx_lock);
+        otpe_tls_server_preinit(cert_file, key_file);
+        pthread_mutex_lock(&g_server_ctx_lock);
+    }
+    SSL_CTX* ctx = g_server_ctx;
+    pthread_mutex_unlock(&g_server_ctx_lock);
+
+    if (!ctx) return NULL;
+
     otpe_tls_t* t = calloc(1, sizeof(*t));
     if (!t) return NULL;
 
-    t->ctx = SSL_CTX_new(TLS_server_method());
-    if (!t->ctx) { free(t); return NULL; }
-
-    SSL_CTX_set_min_proto_version(t->ctx, TLS1_2_VERSION);
-    SSL_CTX_set_options(t->ctx, SSL_OP_NO_COMPRESSION);
-
-    if (SSL_CTX_use_certificate_file(t->ctx, cert_file, SSL_FILETYPE_PEM) != 1) {
-        SSL_CTX_free(t->ctx); free(t); return NULL;
-    }
-    if (SSL_CTX_use_PrivateKey_file(t->ctx, key_file, SSL_FILETYPE_PEM) != 1) {
-        SSL_CTX_free(t->ctx); free(t); return NULL;
-    }
-
-    t->ssl = SSL_new(t->ctx);
-    if (!t->ssl) { SSL_CTX_free(t->ctx); free(t); return NULL; }
+    t->ctx = ctx;
+    t->owns_ctx = 0;
+    t->ssl = SSL_new(ctx);
+    if (!t->ssl) { free(t); return NULL; }
 
     SSL_set_fd(t->ssl, fd);
     if (SSL_accept(t->ssl) != 1) {
-        SSL_free(t->ssl); SSL_CTX_free(t->ctx); free(t); return NULL;
+        SSL_free(t->ssl);
+        free(t);
+        return NULL;
     }
     return t;
 }
@@ -81,6 +118,7 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni) {
 
     t->ctx = SSL_CTX_new(TLS_client_method());
     if (!t->ctx) { free(t); return NULL; }
+    t->owns_ctx = 1;
 
     SSL_CTX_set_min_proto_version(t->ctx, TLS1_2_VERSION);
     SSL_CTX_set_verify(t->ctx, SSL_VERIFY_NONE, NULL);
@@ -117,8 +155,18 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni) {
 
 void otpe_tls_free(otpe_tls_t* t) {
     if (!t) return;
-    if (t->ssl) { SSL_shutdown(t->ssl); SSL_free(t->ssl); }
-    if (t->ctx) SSL_CTX_free(t->ctx);
+    if (t->ssl) {
+        int fd = SSL_get_fd(t->ssl);
+        if (fd >= 0) {
+            int flags = fcntl(fd, F_GETFL, 0);
+            if (flags >= 0) fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+        }
+        SSL_shutdown(t->ssl);
+        SSL_free(t->ssl);
+    }
+    if (t->ctx && t->owns_ctx) {
+        SSL_CTX_free(t->ctx);
+    }
     free(t);
 }
 

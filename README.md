@@ -3,7 +3,8 @@
 A custom proxy protocol on top of TLS with camouflage to a real website (Reality-compatible).
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-![build](https://img.shields.io/badge/build-passing-brightgreen)
+[![build](https://github.com/0extra/0TPE/actions/workflows/build.yml/badge.svg)](https://github.com/0extra/0TPE/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/0extra/0TPE)](https://github.com/0extra/0TPE/releases)
 
 ## What it is
 
@@ -11,24 +12,27 @@ A custom proxy protocol on top of TLS with camouflage to a real website (Reality
 
 ## Features
 
-- Custom transport protocol with a minimal 16-byte header
+- Custom transport protocol with a minimal **16-byte header**
 - TLS wrapper on top of OpenSSL
 - X25519-encrypted handshake — only a matching client is recognized by the server
 - Fallback: foreign connections are transparently proxied to a real decoy site
 - Anti-replay: HMAC with timestamp ±30s + in-memory nonce cache (4096 entries, 60s window)
 - SOCKS5 (TCP + UDP ASSOCIATE) and HTTP CONNECT on the client
-- Multi-client server and client (pthreads)
+- Multi-client server and client (pthreads, no thread count limit)
+- DNS cache (30-second TTL, 256 hosts) — parallel requests don't serialize on `getaddrinfo`
+- 10-second idle timeout in relay — stuck connections are cleaned up automatically
 - Config file — change ports/SNI/token without recompiling
-- IPv4 + IPv6 with automatic fallback
+- IPv4 + IPv6 with automatic fallback (300ms IPv6 timeout, 500ms IPv4 timeout)
 - Link generator (`otpe://...`)
 - Fuzz-tested TLS ClientHello parser (63M executions, 0 crashes)
 - GitHub Actions CI
+- Docker multi-stage build (31.9 MB image)
 
-## Benchmarks (local loopback)
+## Benchmarks (loopback)
 
 Tested on a laptop with a modern x86_64 CPU, OpenSSL 3.x, TCP_NODELAY enabled.
 
-### RTT (round-trip time)
+### RTT (round-trip time, 1000 iterations)
 
 ```
 === 0TPE RTT benchmark ===
@@ -43,7 +47,7 @@ avg:  0.029 ms
 
 29 microseconds average RTT over TLS + 0TPE + relay on loopback.
 
-### Throughput
+### Throughput (single stream)
 
 ```
 === 0TPE throughput benchmark ===
@@ -53,7 +57,19 @@ elapsed:     7.200 s
 throughput:  13.89 MB/s (111.11 Mbps)
 ```
 
-111 Mbps single-stream throughput over TLS + 0TPE + relay on loopback. On a real VPS with a gigabit uplink, 100–500 Mbps end-to-end is realistic.
+111 Mbps single-stream throughput. On a real VPS with a gigabit uplink, 100–500 Mbps end-to-end is realistic.
+
+### Parallel connections
+
+Real-world performance through the SOCKS5 proxy:
+
+| Scenario | Wall clock |
+|---|---|
+| 1 curl to wikipedia.org | 0.6 s |
+| 3 parallel curls | 1.6 s |
+| 20 parallel curls | ~11 s (limited by upstream anti-bot, not by 0TPE) |
+
+With 20 parallel requests, ~14–18 succeed within 1 second. The remaining connections get stuck waiting for the upstream server's TLS handshake; our **10-second idle timeout** kills them, so the whole test completes in 11 seconds instead of 121.
 
 ## Dependencies
 
@@ -118,7 +134,7 @@ Binaries produced:
 ```bash
 # On VPS (Ubuntu 22.04+)
 sudo apt update && sudo apt install build-essential libssl-dev git
-git clone <your-repo> 0TPE
+git clone https://github.com/0extra/0TPE.git
 cd 0TPE
 ./scripts/gen_cert.sh
 ./scripts/gen_keys.sh
@@ -143,6 +159,13 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now 0tpe-server
+```
+
+Or with Docker:
+
+```bash
+docker compose up -d
+docker compose logs -f
 ```
 
 **Don't forget** to copy `keys/server.pub` to the client machine — it is needed for the Reality-lite handshake.
@@ -188,6 +211,7 @@ You will see:
   SOCKS5 on 127.0.0.1:1080
   HTTP   on 127.0.0.1:8080
   Reality pubkey: keys/server.pub
+  TLS retries: 3
   UDP    on 127.0.0.1:<port>
 ```
 
@@ -219,6 +243,28 @@ Settings → Network Settings → Manual proxy configuration:
 
 - SOCKS Host: `127.0.0.1`, Port: `1080`, SOCKS v5, **check "Proxy DNS when using SOCKS v5"** — mandatory
 - or HTTP Proxy: `127.0.0.1:8080`, "Also use for HTTPS" ✅
+
+### Chromium
+
+```bash
+chromium --proxy-server="socks5://127.0.0.1:1080" \
+         --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
+         --proxy-bypass-list="<-loopback>" \
+         --user-data-dir=/tmp/chromium-0tpe
+```
+
+To reduce log noise from background Google services:
+
+```bash
+chromium --proxy-server="socks5://127.0.0.1:1080" \
+         --host-resolver-rules="MAP * ~NOTFOUND , EXCLUDE 127.0.0.1" \
+         --proxy-bypass-list="<-loopback>" \
+         --disable-background-networking \
+         --disable-component-update \
+         --disable-sync \
+         --no-first-run \
+         --user-data-dir=/tmp/chromium-0tpe
+```
 
 ### Telegram Desktop
 
@@ -274,7 +320,9 @@ make bench
 
 - **otpe-client** listens on `127.0.0.1:1080` (SOCKS5), `127.0.0.1:8080` (HTTP CONNECT), and a dynamic UDP port
 - Sends `CONNECT host:port` or `UDP host:port` commands via the 0TPE header
-- **otpe-server** connects to the target and relays bytes in both directions
+- **otpe-server** connects to the target and relays bytes in both directions with:
+  - 10-second idle timeout (kill stuck connections)
+  - 5-second grace timeout after one side closes
 
 ## How Reality-lite works
 
@@ -295,8 +343,9 @@ make bench
 ## Limitations
 
 - Against a **targeted** DPI with Chrome fingerprinting (e.g., Russian RKN with active analysis) it may not work — OpenSSL cannot fully reproduce Chrome's ClientHello. Requires BoringSSL or uTLS.
-- No multiplexing — each connection is a new TLS session to the server.
-- UDP relay does not support multicast or broadcast.
+- No multiplexing — each connection is a new TLS session. Attempts to implement MUX over OpenSSL failed (see `docs/CODE_AUDIT.md`).
+- UDP relay is stateless per datagram — long-lived UDP flows (QUIC, VoIP) may not work efficiently.
+- Idle timeout is 10 seconds: some applications that hold idle connections (push notifications, keep-alives) will see them dropped and reconnect.
 
 ## Diagnostics
 
@@ -325,6 +374,7 @@ issuer=C=US, O=Microsoft Corporation, CN=Microsoft TLS G2 RSA CA OCSP 04
 - `[tid ...] OTPE client, SNI=...` — our client recognized
 - `[UDP tid ...] -> 8.8.8.8:53 (29 bytes)` — UDP relay working
 - `[fallback] -> www.microsoft.com:443` — foreign connection redirected to fallback
+- `[relay] idle timeout (10009 ms no data)` — stuck connection cleaned up (normal)
 
 ## Project structure
 
@@ -336,9 +386,9 @@ docs/                — SPEC.md, THREAT_MODEL.md, CODE_AUDIT.md
 fuzz/                — libFuzzer target + corpus
 include/             — header files
 keys/                — X25519 keys (generated)
-scripts/             — gen_cert.sh, gen_keys.sh
+scripts/             — gen_cert.sh, gen_keys.sh, build_release.sh
 src/
-  common/            — shared code
+  common/            — shared code (protocol, tls, relay, dns_cache, ...)
   client/            — client entry point
   server/            — server entry point
   ping/              — otpe-ping

@@ -17,9 +17,12 @@
 #include "http_proxy.h"
 #include "crypto.h"
 #include "config.h"
+#include "dns_cache.h"
 
 #define UDP_IDLE_TIMEOUT 60
 #define MAX_UDP_SESSIONS 32
+#define TLS_MAX_RETRIES 3
+#define TLS_RETRY_DELAY_MS 50
 
 static otpe_client_config_t g_cfg;
 static uint8_t g_token[OTPE_TOKEN_SIZE];
@@ -59,25 +62,48 @@ static int send_connect_request(otpe_tls_t* tls, const char* host, uint16_t port
     return sent == (ssize_t)(OTPE_HEADER_SIZE + payload_len) ? 0 : -1;
 }
 
+static otpe_tls_t* open_tls_with_retry(int* server_fd_out, const char* tag) {
+    for (int attempt = 1; attempt <= TLS_MAX_RETRIES; attempt++) {
+        int sfd = connect_server();
+        if (sfd < 0) {
+            if (attempt < TLS_MAX_RETRIES) usleep(TLS_RETRY_DELAY_MS * 1000);
+            continue;
+        }
+
+        otpe_tls_t* tls = otpe_tls_client(sfd, g_cfg.sni);
+        if (tls) {
+            *server_fd_out = sfd;
+            return tls;
+        }
+
+        close(sfd);
+        if (attempt < TLS_MAX_RETRIES) usleep(TLS_RETRY_DELAY_MS * 1000);
+    }
+
+    fprintf(stderr, "[%s] TLS handshake failed after %d attempts\n", tag, TLS_MAX_RETRIES);
+    return NULL;
+}
+
 static void establish_tunnel(int browser_fd, const char* host, uint16_t port, const char* tag) {
-    int server_fd = connect_server();
-    if (server_fd < 0) {
-        fprintf(stderr, "[%s] connect_server failed for %s:%u (errno=%d)\n",
-                tag, host, port, errno);
-        close(browser_fd);
-        return;
-    }
-
-    otpe_tls_t* tls = otpe_tls_client(server_fd, g_cfg.sni);
+    int server_fd = -1;
+    otpe_tls_t* tls = open_tls_with_retry(&server_fd, tag);
     if (!tls) {
-        fprintf(stderr, "[%s] TLS handshake failed for %s:%u\n", tag, host, port);
-        close(server_fd);
         close(browser_fd);
         return;
     }
 
-    if (send_connect_request(tls, host, port) < 0) {
-        fprintf(stderr, "[%s] CONNECT request failed for %s:%u\n", tag, host, port);
+    int connected = 0;
+    for (int attempt = 1; attempt <= 2; attempt++) {
+        if (send_connect_request(tls, host, port) == 0) {
+            connected = 1;
+            break;
+        }
+        fprintf(stderr, "[%s] CONNECT failed (attempt %d) for %s:%u\n", tag, attempt, host, port);
+        if (attempt < 2) usleep(TLS_RETRY_DELAY_MS * 1000);
+    }
+
+    if (!connected) {
+        fprintf(stderr, "[%s] CONNECT failed permanently for %s:%u\n", tag, host, port);
         otpe_tls_free(tls);
         close(server_fd);
         close(browser_fd);
@@ -238,10 +264,10 @@ static udp_session_t* udp_find_or_create(struct sockaddr_storage* src, socklen_t
     s->server_fd = -1;
     s->tls_fd = -1;
 
-    int sfd = connect_server();
-    if (sfd < 0) return NULL;
-    otpe_tls_t* t = otpe_tls_client(sfd, g_cfg.sni);
-    if (!t) { close(sfd); return NULL; }
+    int sfd = -1;
+    otpe_tls_t* t = open_tls_with_retry(&sfd, "UDP");
+    if (!t) return NULL;
+
     s->tls = t;
     s->server_fd = sfd;
     s->tls_fd = otpe_tls_get_fd(t);
@@ -391,6 +417,7 @@ int main(int argc, char** argv) {
 
     signal(SIGPIPE, SIG_IGN);
     otpe_tls_init();
+    dns_cache_init();
 
     int socks_fd = make_listen(g_cfg.socks_port);
     if (socks_fd < 0) { perror("bind socks"); return 1; }
@@ -402,6 +429,7 @@ int main(int argc, char** argv) {
     printf("  SOCKS5 on 127.0.0.1:%u\n", g_cfg.socks_port);
     printf("  HTTP   on 127.0.0.1:%u\n", g_cfg.http_port);
     printf("  Reality pubkey: %s\n", g_cfg.reality_pubkey_file);
+    printf("  TLS retries: %d\n", TLS_MAX_RETRIES);
 
     pthread_t udp_tid;
     pthread_create(&udp_tid, NULL, udp_listener_thread, NULL);

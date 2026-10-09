@@ -672,3 +672,17 @@ may consider it more useful to permit linking proprietary applications with
 the library.  If this is what you want to do, use the GNU Lesser General
 Public License instead of this License.  But first, please read
 <https://www.gnu.org/licenses/why-not-lgpl.html>.
+
+cat >> LICENSE <<'EOF'
+
+0TPE OpenSSL/BoringSSL Exception
+=================================
+
+As a special exception, the copyright holders of 0TPE give you
+permission to link 0TPE with the OpenSSL Toolkit and its derivatives
+(including BoringSSL) and to distribute the resulting binaries under
+the terms of the GNU General Public License version 3, provided that
+you comply with the OpenSSL License and the original SSLeay License
+with respect to OpenSSL and BoringSSL, and provided that you include
+the notices described in the THIRD_PARTY_LICENSES file.
+EOF

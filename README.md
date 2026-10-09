@@ -423,4 +423,8 @@ LICENSE
 
 ## License
 
-GNU General Public License v3.0 — see the [LICENSE](LICENSE) file.
+GNU General Public License v3.0, with an OpenSSL/BoringSSL linking
+exception — see [LICENSE](LICENSE).
+
+Third-party license notices are in
+[THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).

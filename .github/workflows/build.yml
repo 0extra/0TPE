@@ -14,13 +14,17 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev
+          sudo apt-get install -y build-essential cmake ninja-build golang
 
-      - name: Generate cert and keys
+      - name: Build BoringSSL
         run: |
-          chmod +x scripts/gen_cert.sh scripts/gen_keys.sh
-          ./scripts/gen_cert.sh
-          ./scripts/gen_keys.sh
+          chmod +x scripts/build_boringssl.sh
+          ./scripts/build_boringssl.sh
+
+      - name: Generate CA and certificates
+        run: |
+          chmod +x scripts/gen_ca.sh
+          ./scripts/gen_ca.sh
 
       - name: Build
         run: make clean && make

@@ -3,13 +3,18 @@ set -e
 
 BORINGSSL_DIR="${1:-/opt/boringssl}"
 
-if [ -d "$BORINGSSL_DIR/build" ] && [ -f "$BORINGSSL_DIR/build/ssl/libssl.a" ]; then
+if [ -d "$BORINGSSL_DIR/build" ] && [ -f "$BORINGSSL_DIR/build/libssl.a" ]; then
     echo "BoringSSL already built at $BORINGSSL_DIR"
     exit 0
 fi
 
-sudo mkdir -p "$BORINGSSL_DIR"
-sudo chown "$USER:$USER" "$BORINGSSL_DIR"
+if [ ! -d "$BORINGSSL_DIR" ]; then
+    mkdir -p "$BORINGSSL_DIR" 2>/dev/null || {
+        sudo mkdir -p "$BORINGSSL_DIR"
+        sudo chown "$(id -u):$(id -g)" "$BORINGSSL_DIR"
+    }
+fi
+
 cd "$BORINGSSL_DIR"
 
 if [ ! -d .git ]; then

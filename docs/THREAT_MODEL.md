@@ -344,7 +344,7 @@ Assuming TLS 1.3:
 
 - Use `--socks5-hostname` or "Proxy DNS when using SOCKS v5" to avoid DNS leaks.
 - Do not reuse the same X25519 keypair across multiple servers.
-- Rotate X25519 keys periodically (`scripts/gen_keys.sh`).
+- Rotate CA and client certificates periodically (`scripts/gen_ca.sh`).
 - Run the server behind a CDN if you expect targeted attacks (out of scope here).
 - Treat 0TPE as a **practical** tool for bypassing DPI, not as a **high-security** anonymity system.
 

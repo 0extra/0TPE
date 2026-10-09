@@ -10,12 +10,14 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/evp.h>
 #include "protocol.h"
 #include "relay.h"
 #include "tls.h"
 #include "socks5.h"
 #include "http_proxy.h"
-#include "crypto.h"
 #include "config.h"
 #include "dns_cache.h"
 
@@ -26,13 +28,14 @@
 
 static otpe_client_config_t g_cfg;
 static uint8_t g_token[OTPE_TOKEN_SIZE];
-static void* g_server_pubkey = NULL;
+static X509* g_client_cert = NULL;
+static EVP_PKEY* g_client_key = NULL;
 static uint16_t g_udp_port = 0;
 static int g_udp_socket = -1;
 static volatile int g_shutdown = 0;
 
 static int connect_server(void) {
-    int sock = otpe_connect_timeout(g_cfg.server_ip, g_cfg.server_port, 5000);
+    int sock = otpe_connect_timeout(g_cfg.server_ip, g_cfg.server_port);
     if (sock < 0) return -1;
     otpe_set_tcp_nodelay(sock);
     return sock;
@@ -409,11 +412,31 @@ int main(int argc, char** argv) {
     }
     config_token_to_bytes(g_cfg.token, g_token, OTPE_TOKEN_SIZE);
 
-    if (crypto_load_public_key(g_cfg.reality_pubkey_file, &g_server_pubkey) != 0) {
-        printf("Error: cannot load %s\n", g_cfg.reality_pubkey_file);
+    FILE* certf = fopen(g_cfg.client_cert_file, "r");
+    if (!certf) {
+        printf("Error: cannot open %s\n", g_cfg.client_cert_file);
         return 1;
     }
-    otpe_tls_set_server_pubkey(g_server_pubkey);
+    g_client_cert = PEM_read_X509(certf, NULL, NULL, NULL);
+    fclose(certf);
+    if (!g_client_cert) {
+        printf("Error: invalid client certificate\n");
+        return 1;
+    }
+
+    FILE* keyf = fopen(g_cfg.client_key_file, "r");
+    if (!keyf) {
+        printf("Error: cannot open %s\n", g_cfg.client_key_file);
+        return 1;
+    }
+    g_client_key = PEM_read_PrivateKey(keyf, NULL, NULL, NULL);
+    fclose(keyf);
+    if (!g_client_key) {
+        printf("Error: invalid client key\n");
+        return 1;
+    }
+
+    otpe_tls_set_client_cert(g_client_cert, g_client_key);
 
     signal(SIGPIPE, SIG_IGN);
     otpe_tls_init();
@@ -428,7 +451,7 @@ int main(int argc, char** argv) {
            g_cfg.server_ip, g_cfg.server_port, g_cfg.sni);
     printf("  SOCKS5 on 127.0.0.1:%u\n", g_cfg.socks_port);
     printf("  HTTP   on 127.0.0.1:%u\n", g_cfg.http_port);
-    printf("  Reality pubkey: %s\n", g_cfg.reality_pubkey_file);
+    printf("  Client cert: %s\n", g_cfg.client_cert_file);
     printf("  TLS retries: %d\n", TLS_MAX_RETRIES);
 
     pthread_t udp_tid;

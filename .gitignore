@@ -18,3 +18,8 @@ dist/
 *.pcap
 .vscode/
 *.swpdist/
+certs/
+keys/
+*.bak
+*.csr
+*.srl

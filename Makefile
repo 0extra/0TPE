@@ -1,11 +1,33 @@
+USE_BORINGSSL ?= 1
+
 CC = gcc
 CFLAGS  = -Wall -Wextra -O2 -Iinclude -g
-LDFLAGS = -lssl -lcrypto -lpthread
+LDFLAGS =
+LIBS    = -lpthread
+
+ifeq ($(USE_BORINGSSL),1)
+    BORINGSSL_DIR = /opt/boringssl
+    CFLAGS  += -I$(BORINGSSL_DIR)/include
+    LDFLAGS += -L$(BORINGSSL_DIR)/build/ssl -L$(BORINGSSL_DIR)/build/crypto
+    LIBS    := -Wl,--start-group \
+               $(BORINGSSL_DIR)/build/libssl.a \
+               $(BORINGSSL_DIR)/build/libcrypto.a \
+               -Wl,--end-group \
+               -lstdc++ \
+               $(LIBS)
+else
+    LIBS    := -Wl,--start-group \
+               $(BORINGSSL_DIR)/build/libssl.a \
+               $(BORINGSSL_DIR)/build/libcrypto.a \
+               -Wl,--end-group \
+               -lstdc++ \
+               $(LIBS)
+endif
 
 FUZZ_CC = clang
 FUZZ_CFLAGS = -fsanitize=fuzzer,address,undefined -Iinclude -g -O1
 
-SRC_COMMON = src/common/protocol.c src/common/relay.c src/common/tls.c src/common/socks5.c src/common/config.c src/common/http_proxy.c src/common/tls_peek.c src/common/crypto.c src/common/nonce_cache.c src/common/uri.c src/common/dns_cache.c
+SRC_COMMON = src/common/protocol.c src/common/relay.c src/common/tls.c src/common/socks5.c src/common/config.c src/common/http_proxy.c src/common/tls_peek.c src/common/crypto.c src/common/dns_cache.c src/common/uri.c
 SRC_SERVER = src/server/main.c $(SRC_COMMON)
 SRC_CLIENT = src/client/main.c $(SRC_COMMON)
 SRC_PING   = src/ping/main.c   $(SRC_COMMON)
@@ -19,39 +41,36 @@ SRC_BENCH_RTT = bench/rtt.c $(SRC_COMMON)
 all: otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-crypto otpe-test-udp
 
 otpe-server: $(SRC_SERVER)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 otpe-client: $(SRC_CLIENT)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 otpe-ping: $(SRC_PING)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 otpe-genlink: $(SRC_GENLINK)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 otpe-test: $(SRC_TEST_PROTO)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 otpe-test-crypto: $(SRC_TEST_CRYPTO)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 otpe-test-udp: $(SRC_TEST_UDP)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 bench-rtt: $(SRC_BENCH_RTT)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 bench-throughput: $(SRC_BENCH_THROUGHPUT)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 bench: bench-rtt bench-throughput
 
 release: all bench
-	@echo "Building release binaries (stripped)..."
 	strip --strip-all otpe-server otpe-client otpe-genlink otpe-ping bench-rtt bench-throughput
-	@echo "Done. Binaries:"
-	@ls -la otpe-server otpe-client otpe-genlink otpe-ping bench-rtt bench-throughput
 
 fuzz: fuzz/fuzz_clienthello.c src/common/tls_peek.c
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o fuzz/fuzz_clienthello fuzz/fuzz_clienthello.c src/common/tls_peek.c

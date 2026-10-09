@@ -23,31 +23,16 @@ static int parse_line(char* line, char** key, char** value) {
     return (*key[0] && *value[0]) ? 0 : -1;
 }
 
-void config_default_server(otpe_server_config_t* out) {
+int config_load_server(const char* path, otpe_server_config_t* out) {
     memset(out, 0, sizeof(*out));
     strcpy(out->listen_ip, "0.0.0.0");
     out->listen_port = 8443;
     strcpy(out->cert_file, "certs/server.crt");
-    strcpy(out->key_file,  "certs/server.key");
-    strcpy(out->reality_key_file, "keys/server.key");
+    strcpy(out->key_file, "certs/server.key");
+    strcpy(out->ca_file, "certs/ca.crt");
     strcpy(out->fallback_sni, "www.microsoft.com");
     strcpy(out->log_level, "info");
-}
 
-void config_default_client(otpe_client_config_t* out) {
-    memset(out, 0, sizeof(*out));
-    strcpy(out->server_ip,  "127.0.0.1");
-    out->server_port = 8443;
-    out->socks_port  = 1080;
-    out->http_port   = 8080;
-    strcpy(out->sni, "www.microsoft.com");
-    strcpy(out->token, "550e8400e29b41d4a716446655440000");
-    strcpy(out->reality_pubkey_file, "keys/server.pub");
-    strcpy(out->log_level, "info");
-}
-
-int config_load_server(const char* path, otpe_server_config_t* out) {
-    config_default_server(out);
     FILE* f = fopen(path, "r");
     if (!f) return -1;
 
@@ -56,20 +41,30 @@ int config_load_server(const char* path, otpe_server_config_t* out) {
         char* key, *value;
         if (parse_line(line, &key, &value) != 0) continue;
 
-        if      (strcmp(key, "listen_ip")         == 0) strncpy(out->listen_ip,  value, sizeof(out->listen_ip) - 1);
-        else if (strcmp(key, "listen_port")       == 0) out->listen_port = (uint16_t)atoi(value);
-        else if (strcmp(key, "cert_file")         == 0) strncpy(out->cert_file,  value, sizeof(out->cert_file) - 1);
-        else if (strcmp(key, "key_file")          == 0) strncpy(out->key_file,   value, sizeof(out->key_file) - 1);
-        else if (strcmp(key, "reality_key_file")  == 0) strncpy(out->reality_key_file, value, sizeof(out->reality_key_file) - 1);
-        else if (strcmp(key, "fallback_sni")      == 0) strncpy(out->fallback_sni, value, sizeof(out->fallback_sni) - 1);
-        else if (strcmp(key, "log_level")         == 0) strncpy(out->log_level,  value, sizeof(out->log_level) - 1);
+        if      (strcmp(key, "listen_ip")    == 0) strncpy(out->listen_ip,  value, sizeof(out->listen_ip) - 1);
+        else if (strcmp(key, "listen_port")  == 0) out->listen_port = (uint16_t)atoi(value);
+        else if (strcmp(key, "cert_file")    == 0) strncpy(out->cert_file,  value, sizeof(out->cert_file) - 1);
+        else if (strcmp(key, "key_file")     == 0) strncpy(out->key_file,   value, sizeof(out->key_file) - 1);
+        else if (strcmp(key, "ca_file")      == 0) strncpy(out->ca_file,    value, sizeof(out->ca_file) - 1);
+        else if (strcmp(key, "fallback_sni") == 0) strncpy(out->fallback_sni, value, sizeof(out->fallback_sni) - 1);
+        else if (strcmp(key, "log_level")    == 0) strncpy(out->log_level,  value, sizeof(out->log_level) - 1);
     }
     fclose(f);
     return 0;
 }
 
 int config_load_client(const char* path, otpe_client_config_t* out) {
-    config_default_client(out);
+    memset(out, 0, sizeof(*out));
+    strcpy(out->server_ip, "127.0.0.1");
+    out->server_port = 8443;
+    out->socks_port = 1080;
+    out->http_port = 8080;
+    strcpy(out->sni, "www.microsoft.com");
+    strcpy(out->token, "550e8400e29b41d4a716446655440000");
+    strcpy(out->client_cert_file, "certs/client.crt");
+    strcpy(out->client_key_file, "certs/client.key");
+    strcpy(out->log_level, "info");
+
     FILE* f = fopen(path, "r");
     if (!f) return -1;
 
@@ -78,14 +73,15 @@ int config_load_client(const char* path, otpe_client_config_t* out) {
         char* key, *value;
         if (parse_line(line, &key, &value) != 0) continue;
 
-        if      (strcmp(key, "server_ip")           == 0) strncpy(out->server_ip,  value, sizeof(out->server_ip) - 1);
-        else if (strcmp(key, "server_port")         == 0) out->server_port = (uint16_t)atoi(value);
-        else if (strcmp(key, "socks_port")          == 0) out->socks_port  = (uint16_t)atoi(value);
-        else if (strcmp(key, "http_port")           == 0) out->http_port   = (uint16_t)atoi(value);
-        else if (strcmp(key, "sni")                 == 0) strncpy(out->sni,        value, sizeof(out->sni) - 1);
-        else if (strcmp(key, "token")               == 0) strncpy(out->token,      value, sizeof(out->token) - 1);
-        else if (strcmp(key, "reality_pubkey_file") == 0) strncpy(out->reality_pubkey_file, value, sizeof(out->reality_pubkey_file) - 1);
-        else if (strcmp(key, "log_level")           == 0) strncpy(out->log_level,  value, sizeof(out->log_level) - 1);
+        if      (strcmp(key, "server_ip")        == 0) strncpy(out->server_ip,  value, sizeof(out->server_ip) - 1);
+        else if (strcmp(key, "server_port")      == 0) out->server_port = (uint16_t)atoi(value);
+        else if (strcmp(key, "socks_port")       == 0) out->socks_port  = (uint16_t)atoi(value);
+        else if (strcmp(key, "http_port")        == 0) out->http_port   = (uint16_t)atoi(value);
+        else if (strcmp(key, "sni")              == 0) strncpy(out->sni, value, sizeof(out->sni) - 1);
+        else if (strcmp(key, "token")            == 0) strncpy(out->token, value, sizeof(out->token) - 1);
+        else if (strcmp(key, "client_cert_file") == 0) strncpy(out->client_cert_file, value, sizeof(out->client_cert_file) - 1);
+        else if (strcmp(key, "client_key_file")  == 0) strncpy(out->client_key_file, value, sizeof(out->client_key_file) - 1);
+        else if (strcmp(key, "log_level")        == 0) strncpy(out->log_level, value, sizeof(out->log_level) - 1);
     }
     fclose(f);
     return 0;

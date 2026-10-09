@@ -45,10 +45,36 @@ bool otpe_decode_header(const uint8_t* buffer, size_t buffer_size, otpe_header_t
     header->length   = read_uint16_be(&buffer[4]);
     header->checksum = read_uint16_be(&buffer[6]);
     memcpy(header->token, &buffer[8], OTPE_TOKEN_SIZE);
+
+    uint8_t tmp[OTPE_HEADER_SIZE];
+    memcpy(tmp, buffer, OTPE_HEADER_SIZE);
+    tmp[6] = 0;
+    tmp[7] = 0;
+    uint16_t computed = otpe_checksum(tmp, OTPE_HEADER_SIZE);
+    if (computed != header->checksum) return false;
     return true;
 }
 
 bool otpe_validate_header(const otpe_header_t* header) {
     if (header->version != OTPE_VERSION) return false;
+    if (header->reserved != 0) return false;
+    if (header->flags != 0) return false;
+    switch (header->command) {
+        case OTPE_CMD_TCP:
+        case OTPE_CMD_UDP:
+        case OTPE_CMD_STREAM:
+        case OTPE_CMD_PING:
+        case OTPE_CMD_PONG:
+        case OTPE_CMD_CONNECT:
+            break;
+        default:
+            return false;
+    }
+    if (header->command == OTPE_CMD_PING || header->command == OTPE_CMD_PONG) {
+        if (header->length != 0) return false;
+    }
+    if (header->command == OTPE_CMD_CONNECT) {
+        if (header->length < 2) return false;
+    }
     return true;
 }

@@ -4,9 +4,11 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <pthread.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
 
 struct otpe_tls {
     SSL_CTX* ctx;
@@ -114,7 +116,7 @@ otpe_tls_t* otpe_tls_server(int fd, const char* cert_file, const char* key_file,
     return t;
 }
 
-otpe_tls_t* otpe_tls_client(int fd, const char* sni) {
+otpe_tls_t* otpe_tls_client(int fd, const char* sni, const char* ca_file) {
     ensure_openssl();
     otpe_tls_t* t = calloc(1, sizeof(*t));
     if (!t) return NULL;
@@ -124,7 +126,16 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni) {
     t->owns_ctx = 1;
 
     SSL_CTX_set_min_proto_version(t->ctx, TLS1_2_VERSION);
-    SSL_CTX_set_verify(t->ctx, SSL_VERIFY_NONE, NULL);
+
+    if (SSL_CTX_load_verify_locations(t->ctx, ca_file, NULL) != 1) {
+        fprintf(stderr, "[tls] cannot load CA file %s\n", ca_file);
+        SSL_CTX_free(t->ctx);
+        free(t);
+        return NULL;
+    }
+
+    SSL_CTX_set_verify(t->ctx, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_verify_depth(t->ctx, 4);
 
     SSL_CTX_set1_groups_list(t->ctx, "X25519:P-256:P-384");
 
@@ -165,10 +176,12 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni) {
 
     if (sni && *sni) {
         SSL_set_tlsext_host_name(t->ssl, sni);
+        SSL_set1_host(t->ssl, sni);
     }
 
     SSL_set_fd(t->ssl, fd);
     if (SSL_connect(t->ssl) != 1) {
+        fprintf(stderr, "[tls] server certificate verification failed\n");
         SSL_free(t->ssl); SSL_CTX_free(t->ctx); free(t); return NULL;
     }
     return t;

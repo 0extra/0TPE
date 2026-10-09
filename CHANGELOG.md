@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.5] - 2026-10-09
+
+### Fixed
+
+- **Mutual TLS failed with `server certificate verification failed`** — `scripts/gen_ca.sh` did not add `basicConstraints=CA:TRUE` to the internal CA, so OpenSSL 3.x / BoringSSL refused to build a chain from it. Both the client and the server rejected each other's certificates. Regenerate certificates with the updated script.
+- **UDP did not work end-to-end** — the server's `handle_client` read the header of the first `OTPE_CMD_UDP` frame and passed control to `handle_udp_session` without consuming the frame's payload. The session then tried to read a second header from stale bytes, `otpe_decode_header` failed, and the connection closed. The first frame's payload is now parsed before entering the session loop.
+- **Client UDP session race** — `udp_session_thread` was created with `pthread_detach`, but `udp_find_or_create` called `pthread_join` on slot reuse. Join on a detached thread returns `EINVAL` immediately, and the code then freed `s->tls` and closed `s->server_fd` while the thread was still running (use-after-free). Thread is no longer detached; join works correctly.
+- **Client UDP poll missed buffered TLS data** — `udp_session_thread` polled the raw TLS fd without checking `otpe_tls_pending`. If the server wrote two UDP frames back-to-back, the second was stuck in OpenSSL's internal buffer until the poll timeout. Now checks `otpe_tls_pending` before polling, matching `otpe_relay_tls_bidirectional`.
+- ClientHello parser buffer for `tls_peek_clienthello` was smaller than the documented limit.
+
+### Added
+
+- **Config validation** (`config_validate_client` / `config_validate_server`) — checks that `server_ip` / `listen_ip` / `sni` / `fallback_sni` are non-empty, that `socks_port != http_port`, that `token` is a valid hex string of at least `OTPE_TOKEN_SIZE * 2` characters, and that all referenced certificate and key files are readable. Errors are reported before the process opens any sockets.
+- **`tests/test_udp_stress.c`** — 25 concurrent clients × 10 UDP echo queries through the tunnel, with a local UDP echo server on `127.0.0.1` as the target. No DNS, no external network. Verifies byte-for-byte reply matching and reports per-client success.
+- **`tests/run_all.sh`** — one-shot test runner. Builds if needed, starts the server and client under `stdbuf -oL` (so SIGKILL doesn't lose buffered logs), runs unit + integration + fuzz tests, prints a summary, and dumps client/server log tails on failure.
+- **`make test`** target.
+- Line-buffered log capture in the test runner.
+
+### Changed
+
+- `scripts/gen_ca.sh` now adds `basicConstraints`, `keyUsage` and `extendedKeyUsage` to the CA, the server certificate, and the client certificate:
+  - CA: `basicConstraints=critical,CA:TRUE`, `keyUsage=critical,keyCertSign,cRLSign`
+  - Server: `basicConstraints=CA:FALSE`, `keyUsage=digitalSignature,keyEncipherment`, `extendedKeyUsage=serverAuth`, SAN for the SNI
+  - Client: `basicConstraints=CA:FALSE`, `keyUsage=digitalSignature`, `extendedKeyUsage=clientAuth`
+- `Makefile` builds `otpe-test-udp-stress` and exposes the `test` target.
+- Token validation accepts hex strings longer than `OTPE_TOKEN_SIZE * 2` characters. `config_token_to_bytes` already used only the first 8 bytes, so existing 32-character tokens in `0tpe.conf` continue to work unchanged.
+
+### Removed
+
+- Silent acceptance of unreadable certificate and key paths (previously failed later, inside the TLS handshake, with a less useful message).
+
+### Unchanged
+
+- 16-byte header, BoringSSL, ALPN marker (`h2,http/1.1,0tpe`), fallback to `www.microsoft.com`
+- SOCKS5 + HTTP CONNECT + UDP ASSOCIATE
+- DNS cache, idle timeout, grace timeout
+
 ## [0.1.4] - 2026-10-09
 
 ### Changed

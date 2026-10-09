@@ -8,7 +8,7 @@ typedef struct otpe_tls otpe_tls_t;
 
 otpe_tls_t* otpe_tls_server(int fd, const char* cert_file, const char* key_file,
                             const char* ca_file);
-otpe_tls_t* otpe_tls_client(int fd, const char* sni);
+otpe_tls_t* otpe_tls_client(int fd, const char* sni, const char* ca_file);
 void        otpe_tls_free(otpe_tls_t* t);
 
 void        otpe_tls_server_preinit(const char* cert_file, const char* key_file,

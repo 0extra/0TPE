@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <errno.h>
 #include <poll.h>
+#include <time.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -16,6 +17,7 @@
 #include "tls_peek.h"
 #include "config.h"
 #include "dns_cache.h"
+#include "udp_stateful.h"
 
 static otpe_server_config_t g_cfg;
 
@@ -38,65 +40,107 @@ static void handle_fallback(int client, const char* sni) {
     close(client);
 }
 
-static void handle_udp_frame(otpe_tls_t* tls, const uint8_t* token,
-                             const uint8_t* payload, size_t payload_len) {
-    if (payload_len < 1) return;
+static void process_udp_payload(udp_target_t* targets,
+                                const uint8_t* payload, size_t len) {
+    if (len < 1) return;
+
     size_t p = 0;
     uint8_t hlen = payload[p++];
-    if (hlen == 0 || p + hlen + 4 > payload_len) return;
+    if (hlen == 0 || p + hlen + 4 > len) return;
+
     char host[256];
     memcpy(host, payload + p, hlen);
     host[hlen] = '\0';
     p += hlen;
-    uint16_t port = (uint16_t)((payload[p] << 8) | payload[p+1]); p += 2;
-    uint16_t dlen = (uint16_t)((payload[p] << 8) | payload[p+1]); p += 2;
-    if (p + dlen > payload_len) return;
-    const uint8_t* data = payload + p;
 
-    struct addrinfo* res = dns_cache_lookup(host, port, SOCK_DGRAM);
-    if (!res) return;
+    uint16_t port = (uint16_t)((payload[p] << 8) | payload[p + 1]);
+    p += 2;
 
-    int fd = -1;
-    for (struct addrinfo* ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0) continue;
-        if (connect(fd, ai->ai_addr, ai->ai_addrlen) == 0) break;
-        close(fd); fd = -1;
-    }
-    if (fd < 0) return;
-    if (send(fd, data, dlen, 0) != (ssize_t)dlen) { close(fd); return; }
-    struct pollfd pfd = { .fd = fd, .events = POLLIN };
-    int ready = poll(&pfd, 1, 5000);
-    if (ready > 0) {
-        uint8_t reply[65536];
-        ssize_t rn = recv(fd, reply, sizeof(reply), 0);
-        if (rn > 0) {
-            size_t rhlen = strlen(host);
-            size_t total = 1 + rhlen + 2 + 2 + (size_t)rn;
-            if (total <= 65535) {
-                uint8_t out[OTPE_HEADER_SIZE + 65540];
-                otpe_header_t h;
-                h.version = OTPE_VERSION;
-                h.command = OTPE_CMD_UDP;
-                h.flags = 0;
-                h.reserved = 0;
-                h.length = (uint16_t)total;
-                h.checksum = 0;
-                memcpy(h.token, token, OTPE_TOKEN_SIZE);
-                otpe_encode_header(&h, out, OTPE_HEADER_SIZE);
-                size_t op = OTPE_HEADER_SIZE;
-                out[op++] = (uint8_t)rhlen;
-                memcpy(out + op, host, rhlen); op += rhlen;
-                out[op++] = (uint8_t)((port >> 8) & 0xFF);
-                out[op++] = (uint8_t)(port & 0xFF);
-                out[op++] = (uint8_t)(((size_t)rn >> 8) & 0xFF);
-                out[op++] = (uint8_t)((size_t)rn & 0xFF);
-                memcpy(out + op, reply, (size_t)rn); op += (size_t)rn;
-                otpe_tls_send_all(tls, out, op);
-            }
+    uint16_t dlen = (uint16_t)((payload[p] << 8) | payload[p + 1]);
+    p += 2;
+
+    if (p + dlen > len) return;
+
+    int idx = udp_state_get_or_create(targets, host, port);
+    if (idx < 0) return;
+
+    send(targets[idx].fd, payload + p, dlen, 0);
+    targets[idx].last_seen = time(NULL);
+}
+
+static int flush_udp_replies(otpe_tls_t* tls, udp_target_t* targets,
+                             const uint8_t* token) {
+    uint8_t reply[65540];
+    size_t reply_len = 0;
+    char reply_host[256];
+    uint16_t reply_port = 0;
+
+    while (udp_state_poll(targets, reply, sizeof(reply), &reply_len,
+                          reply_host, sizeof(reply_host), &reply_port) == 1) {
+        if (reply_len > 65535) continue;
+
+        otpe_header_t rh;
+        rh.version  = OTPE_VERSION;
+        rh.command  = OTPE_CMD_UDP;
+        rh.flags    = 0;
+        rh.reserved = 0;
+        rh.length   = (uint16_t)reply_len;
+        rh.checksum = 0;
+        memcpy(rh.token, token, OTPE_TOKEN_SIZE);
+
+        uint8_t out[OTPE_HEADER_SIZE + 65540];
+        otpe_encode_header(&rh, out, OTPE_HEADER_SIZE);
+        memcpy(out + OTPE_HEADER_SIZE, reply, reply_len);
+
+        if (otpe_tls_send_all(tls, out, OTPE_HEADER_SIZE + reply_len) <= 0) {
+            return -1;
         }
     }
-    close(fd);
+    return 0;
+}
+
+static void handle_udp_session(otpe_tls_t* tls, const uint8_t* token,
+                               const uint8_t* initial_payload, size_t initial_len) {
+    udp_target_t targets[UDP_TARGETS_MAX];
+    udp_state_init(targets);
+
+    uint8_t hb[OTPE_HEADER_SIZE];
+    uint8_t payload[65540];
+    int tls_fd = otpe_tls_get_fd(tls);
+
+    process_udp_payload(targets, initial_payload, initial_len);
+
+    if (flush_udp_replies(tls, targets, token) < 0) {
+        udp_state_cleanup(targets);
+        return;
+    }
+
+    for (;;) {
+        int tls_ready = otpe_tls_pending(tls) > 0;
+        if (!tls_ready) {
+            struct pollfd pfd = { .fd = tls_fd, .events = POLLIN };
+            if (poll(&pfd, 1, 30) > 0 && (pfd.revents & POLLIN)) {
+                tls_ready = 1;
+            }
+        }
+
+        if (tls_ready) {
+            if (otpe_tls_recv_all(tls, hb, OTPE_HEADER_SIZE) != OTPE_HEADER_SIZE) break;
+
+            otpe_header_t h;
+            if (!otpe_decode_header(hb, OTPE_HEADER_SIZE, &h)) break;
+            if (h.command != OTPE_CMD_UDP) break;
+            if (h.length < 1) break;
+
+            if (otpe_tls_recv_all(tls, payload, h.length) != h.length) break;
+
+            process_udp_payload(targets, payload, h.length);
+        }
+
+        if (flush_udp_replies(tls, targets, token) < 0) break;
+    }
+
+    udp_state_cleanup(targets);
 }
 
 static void handle_client(int client) {
@@ -123,14 +167,20 @@ static void handle_client(int client) {
     printf("[tid %lu] TLS OK\n", (unsigned long)pthread_self());
 
     uint8_t hb[OTPE_HEADER_SIZE];
-    if (otpe_tls_recv_all(tls, hb, OTPE_HEADER_SIZE) != OTPE_HEADER_SIZE) { otpe_tls_free(tls); return; }
+    if (otpe_tls_recv_all(tls, hb, OTPE_HEADER_SIZE) != OTPE_HEADER_SIZE) {
+        otpe_tls_free(tls);
+        return;
+    }
     otpe_header_t h;
-    if (!otpe_decode_header(hb, OTPE_HEADER_SIZE, &h)) { otpe_tls_free(tls); return; }
+    if (!otpe_decode_header(hb, OTPE_HEADER_SIZE, &h) || !otpe_validate_header(&h)) {
+        otpe_tls_free(tls);
+        return;
+    }
 
     if (h.command == OTPE_CMD_PING) {
         otpe_header_t reply = h;
-        reply.command = OTPE_CMD_PONG;
-        reply.length = 0;
+        reply.command  = OTPE_CMD_PONG;
+        reply.length   = 0;
         reply.checksum = 0;
         uint8_t out[OTPE_HEADER_SIZE];
         otpe_encode_header(&reply, out, sizeof(out));
@@ -140,6 +190,7 @@ static void handle_client(int client) {
         for (;;) {
             if (otpe_tls_recv_all(tls, hb, OTPE_HEADER_SIZE) != OTPE_HEADER_SIZE) break;
             if (!otpe_decode_header(hb, OTPE_HEADER_SIZE, &h)) break;
+            if (!otpe_validate_header(&h)) break;
             if (h.command != OTPE_CMD_PING) break;
             if (h.length > 0) {
                 if (otpe_tls_recv_all(tls, payload, h.length) != h.length) break;
@@ -151,20 +202,38 @@ static void handle_client(int client) {
     }
 
     if (h.command == OTPE_CMD_CONNECT) {
-        uint8_t payload[512];
-        if (h.length > sizeof(payload)) { otpe_tls_free(tls); return; }
-        if (otpe_tls_recv_all(tls, payload, h.length) != h.length) { otpe_tls_free(tls); return; }
+        if (h.length < 2 || h.length > 258) {
+            otpe_tls_free(tls);
+            return;
+        }
+
+        uint8_t payload[258];
+        if (otpe_tls_recv_all(tls, payload, h.length) != h.length) {
+            otpe_tls_free(tls);
+            return;
+        }
 
         uint16_t port = (uint16_t)((payload[0] << 8) | payload[1]);
+        if (port == 0) {
+            otpe_tls_free(tls);
+            return;
+        }
+
         char host[256];
         size_t hlen = h.length - 2;
-        if (hlen >= sizeof(host)) { otpe_tls_free(tls); return; }
+        if (hlen == 0 || hlen >= sizeof(host)) {
+            otpe_tls_free(tls);
+            return;
+        }
         memcpy(host, payload + 2, hlen);
         host[hlen] = '\0';
 
         printf("[tid %lu] CONNECT %s:%u\n", (unsigned long)pthread_self(), host, port);
         int target = connect_target(host, port);
-        if (target < 0) { otpe_tls_free(tls); return; }
+        if (target < 0) {
+            otpe_tls_free(tls);
+            return;
+        }
         otpe_set_tcp_nodelay(target);
         printf("[tid %lu] up %s:%u\n", (unsigned long)pthread_self(), host, port);
         otpe_relay_tls_bidirectional(tls, target);
@@ -175,14 +244,16 @@ static void handle_client(int client) {
     }
 
     if (h.command == OTPE_CMD_UDP) {
-        uint8_t payload[65540];
-        for (;;) {
-            if (otpe_tls_recv_all(tls, payload, h.length) != h.length) break;
-            handle_udp_frame(tls, h.token, payload, h.length);
-            if (otpe_tls_recv_all(tls, hb, OTPE_HEADER_SIZE) != OTPE_HEADER_SIZE) break;
-            if (!otpe_decode_header(hb, OTPE_HEADER_SIZE, &h)) break;
-            if (h.command != OTPE_CMD_UDP) break;
+        if (h.length < 1) {
+            otpe_tls_free(tls);
+            return;
         }
+        uint8_t payload[65540];
+        if (otpe_tls_recv_all(tls, payload, h.length) != h.length) {
+            otpe_tls_free(tls);
+            return;
+        }
+        handle_udp_session(tls, h.token, payload, h.length);
         otpe_tls_free(tls);
         return;
     }
@@ -201,7 +272,10 @@ static void* thread_entry(void* arg) {
 int main(int argc, char** argv) {
     const char* cfg_path = argc > 1 ? argv[1] : "0tpe.conf";
     if (config_load_server(cfg_path, &g_cfg) != 0) {
-        printf("Warning: config %s not found, using defaults\n", cfg_path);
+        return 1;
+    }
+    if (config_validate_server(&g_cfg) != 0) {
+        return 1;
     }
 
     signal(SIGPIPE, SIG_IGN);

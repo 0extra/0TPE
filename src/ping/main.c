@@ -27,6 +27,9 @@ int main(int argc, char** argv) {
         fprintf(stderr, "cannot load 0tpe.conf\n");
         return 1;
     }
+    if (config_validate_client(&cfg) != 0) {
+        return 1;
+    }
 
     if (argc > 1) {
         strncpy(cfg.server_ip, argv[1], sizeof(cfg.server_ip) - 1);
@@ -59,7 +62,7 @@ int main(int argc, char** argv) {
     }
     otpe_set_tcp_nodelay(sock);
 
-    otpe_tls_t* tls = otpe_tls_client(sock, cfg.sni);
+    otpe_tls_t* tls = otpe_tls_client(sock, cfg.sni, cfg.ca_file);
     if (!tls) {
         fprintf(stderr, "TLS handshake failed\n");
         close(sock);

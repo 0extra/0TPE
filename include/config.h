@@ -21,6 +21,7 @@ typedef struct {
     uint16_t http_port;
     char     sni[256];
     char     token[64];
+    char     ca_file[256];
     char     client_cert_file[256];
     char     client_key_file[256];
     char     log_level[16];
@@ -28,6 +29,8 @@ typedef struct {
 
 int  config_load_server(const char* path, otpe_server_config_t* out);
 int  config_load_client(const char* path, otpe_client_config_t* out);
+int  config_validate_server(const otpe_server_config_t* cfg);
+int  config_validate_client(const otpe_client_config_t* cfg);
 int  config_token_to_bytes(const char* token_str, uint8_t* out, size_t out_size);
 
 #endif

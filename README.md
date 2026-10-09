@@ -30,9 +30,11 @@ A lightweight transport protocol over TLS with camouflage to a real website.
 - DNS cache (30-second TTL, 256 hosts)
 - 10-second idle timeout in relay
 - Config file — change ports/SNI without recompiling
+- Config validation at startup — readable certs, port conflicts, token format
 - IPv4 + IPv6 with automatic fallback
 - Link generator (`otpe://...`)
 - Fuzz-tested ClientHello parser
+- UDP echo stress test — 250 queries, 0% loss on loopback
 - GitHub Actions CI
 - Docker multi-stage build
 
@@ -109,6 +111,9 @@ chmod +x scripts/gen_ca.sh
 
 # 3. Build 0TPE
 make clean && make && make bench
+
+# 4. Run the full test suite (builds, starts server+client, tears down)
+make test
 ```
 
 Binaries produced:
@@ -120,6 +125,7 @@ Binaries produced:
 - `otpe-test` — protocol unit tests
 - `otpe-test-crypto` — X25519 DH tests
 - `otpe-test-udp` — end-to-end UDP over 0TPE test
+- `otpe-test-udp-stress` — 25×10 UDP echo stress test
 - `bench-rtt` — RTT benchmark
 - `bench-throughput` — throughput benchmark
 
@@ -290,12 +296,21 @@ otpe://550e8400e29b41d4@127.0.0.1:8443?sni=www.microsoft.com#MyServer
 
 ## Testing
 
+Full suite — builds if needed, starts server and client, runs every test, tears down:
+
+```bash
+make test
+```
+
+Individual tests:
+
 ```bash
 make clean && make
 
-./otpe-test
-./otpe-test-crypto
-./otpe-test-udp
+./otpe-test               # protocol encode/decode
+./otpe-test-crypto        # X25519 DH
+./otpe-test-udp           # DNS over UDP end-to-end
+./otpe-test-udp-stress    # 25 clients x 10 echo queries
 ./otpe-ping 127.0.0.1 8443 20
 ```
 
@@ -344,7 +359,7 @@ make bench
 ## Limitations
 
 - No multiplexing — each connection opens a new TLS session
-- UDP relay is stateless per datagram
+- UDP relay keeps per-session state for up to 64 concurrent targets
 - Idle timeout is 10 seconds — some applications that hold idle connections will see them dropped and reconnect
 
 ## Diagnostics
@@ -376,6 +391,8 @@ issuer=C=US, O=Microsoft Corporation, CN=Microsoft TLS G2 RSA CA OCSP 04
 - `[fallback] -> www.microsoft.com:443` — unrecognized connection redirected to fallback
 - `[relay] idle timeout (10009 ms no data)` — stuck connection cleaned up
 - `[tid ...] TLS failed (client cert rejected?)` — client certificate not signed by CA
+- `config: <file> not readable: <path>` — a certificate, key, or CA file is missing or unreadable
+- `config: token must be 16 hex chars` — token in `0tpe.conf` is not a valid hex string of at least 16 characters
 
 ## Project structure
 
@@ -393,7 +410,7 @@ src/
   server/            — server entry point
   ping/              — otpe-ping
   tools/             — genlink
-tests/               — unit tests
+tests/               — unit, integration, and stress tests (run_all.sh)
 0tpe.conf            — default config
 Makefile
 README.md

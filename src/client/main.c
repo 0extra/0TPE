@@ -73,7 +73,7 @@ static otpe_tls_t* open_tls_with_retry(int* server_fd_out, const char* tag) {
             continue;
         }
 
-        otpe_tls_t* tls = otpe_tls_client(sfd, g_cfg.sni);
+        otpe_tls_t* tls = otpe_tls_client(sfd, g_cfg.sni, g_cfg.ca_file);
         if (tls) {
             *server_fd_out = sfd;
             return tls;
@@ -206,17 +206,19 @@ static void* udp_session_thread(void* arg) {
     uint8_t payload[65540];
 
     while (s->alive && !g_shutdown) {
-        struct pollfd pfd;
-        pfd.fd = s->tls_fd;
-        pfd.events = POLLIN;
-        pfd.revents = 0;
-        int r = poll(&pfd, 1, 1000);
-
         time_t now = time(NULL);
         if (now - s->last_seen > UDP_IDLE_TIMEOUT) break;
-        if (r < 0) { if (errno == EINTR) continue; break; }
-        if (r == 0) continue;
-        if (!(pfd.revents & (POLLIN | POLLHUP | POLLERR))) continue;
+
+        if (otpe_tls_pending(s->tls) <= 0) {
+            struct pollfd pfd;
+            pfd.fd = s->tls_fd;
+            pfd.events = POLLIN;
+            pfd.revents = 0;
+            int r = poll(&pfd, 1, 1000);
+            if (r < 0) { if (errno == EINTR) continue; break; }
+            if (r == 0) continue;
+            if (!(pfd.revents & (POLLIN | POLLHUP | POLLERR))) continue;
+        }
 
         pthread_mutex_lock(&s->lock);
         ssize_t hn = otpe_tls_recv_all(s->tls, hb, OTPE_HEADER_SIZE);
@@ -251,6 +253,8 @@ static udp_session_t* udp_find_or_create(struct sockaddr_storage* src, socklen_t
 
     udp_session_t* s = &g_sessions[slot];
     if (s->in_use) {
+        s->alive = 0;
+        pthread_join(s->tid, NULL);
         if (s->tls) otpe_tls_free(s->tls);
         if (s->server_fd >= 0) close(s->server_fd);
     } else {
@@ -269,14 +273,26 @@ static udp_session_t* udp_find_or_create(struct sockaddr_storage* src, socklen_t
 
     int sfd = -1;
     otpe_tls_t* t = open_tls_with_retry(&sfd, "UDP");
-    if (!t) return NULL;
+    if (!t) {
+        s->in_use = 0;
+        return NULL;
+    }
 
     s->tls = t;
     s->server_fd = sfd;
     s->tls_fd = otpe_tls_get_fd(t);
     s->alive = 1;
-    pthread_create(&s->tid, NULL, udp_session_thread, s);
-    pthread_detach(s->tid);
+
+    if (pthread_create(&s->tid, NULL, udp_session_thread, s) != 0) {
+        fprintf(stderr, "udp: pthread_create failed\n");
+        s->alive = 0;
+        s->in_use = 0;
+        otpe_tls_free(s->tls);
+        close(s->server_fd);
+        s->tls = NULL;
+        s->server_fd = -1;
+        return NULL;
+    }
     return s;
 }
 
@@ -408,7 +424,10 @@ static void* listener_thread(void* arg) {
 int main(int argc, char** argv) {
     const char* cfg_path = argc > 1 ? argv[1] : "0tpe.conf";
     if (config_load_client(cfg_path, &g_cfg) != 0) {
-        printf("Warning: config %s not found, using defaults\n", cfg_path);
+        return 1;
+    }
+    if (config_validate_client(&g_cfg) != 0) {
+        return 1;
     }
     config_token_to_bytes(g_cfg.token, g_token, OTPE_TOKEN_SIZE);
 
@@ -451,6 +470,7 @@ int main(int argc, char** argv) {
            g_cfg.server_ip, g_cfg.server_port, g_cfg.sni);
     printf("  SOCKS5 on 127.0.0.1:%u\n", g_cfg.socks_port);
     printf("  HTTP   on 127.0.0.1:%u\n", g_cfg.http_port);
+    printf("  CA file: %s\n", g_cfg.ca_file);
     printf("  Client cert: %s\n", g_cfg.client_cert_file);
     printf("  TLS retries: %d\n", TLS_MAX_RETRIES);
 

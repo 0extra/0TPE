@@ -56,7 +56,7 @@ int main(int argc, char** argv) {
     }
     otpe_set_tcp_nodelay(sock);
 
-    otpe_tls_t* tls = otpe_tls_client(sock, cfg.sni);
+    otpe_tls_t* tls = otpe_tls_client(sock, cfg.sni, cfg.ca_file);
     if (!tls) {
         fprintf(stderr, "TLS handshake failed\n");
         close(sock);

@@ -211,7 +211,7 @@ static int try_connect_one(struct addrinfo* p, int timeout_ms) {
     return fd;
 }
 
-int otpe_connect_timeout(const char* host, uint16_t port, int timeout_ms) {
+int otpe_connect_timeout(const char* host, uint16_t port) {
     struct addrinfo* res = dns_cache_lookup(host, port, SOCK_STREAM);
     if (!res) return -1;
 

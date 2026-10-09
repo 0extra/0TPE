@@ -9,7 +9,7 @@ typedef struct {
     uint16_t listen_port;
     char     cert_file[256];
     char     key_file[256];
-    char     reality_key_file[256];
+    char     ca_file[256];
     char     fallback_sni[256];
     char     log_level[16];
 } otpe_server_config_t;
@@ -21,14 +21,13 @@ typedef struct {
     uint16_t http_port;
     char     sni[256];
     char     token[64];
-    char     reality_pubkey_file[256];
+    char     client_cert_file[256];
+    char     client_key_file[256];
     char     log_level[16];
 } otpe_client_config_t;
 
 int  config_load_server(const char* path, otpe_server_config_t* out);
 int  config_load_client(const char* path, otpe_client_config_t* out);
-void config_default_server(otpe_server_config_t* out);
-void config_default_client(otpe_client_config_t* out);
 int  config_token_to_bytes(const char* token_str, uint8_t* out, size_t out_size);
 
 #endif

@@ -14,16 +14,13 @@
 #include "relay.h"
 #include "tls.h"
 #include "tls_peek.h"
-#include "crypto.h"
 #include "config.h"
-#include "nonce_cache.h"
 #include "dns_cache.h"
 
 static otpe_server_config_t g_cfg;
-static void* g_server_privkey = NULL;
 
 static int connect_target(const char* host, uint16_t port) {
-    return otpe_connect_timeout(host, port, 5000);
+    return otpe_connect_timeout(host, port);
 }
 
 static void handle_fallback(int client, const char* sni) {
@@ -104,31 +101,25 @@ static void handle_udp_frame(otpe_tls_t* tls, const uint8_t* token,
 
 static void handle_client(int client) {
     char sni[256];
-    uint8_t ext_data[256];
-    size_t ext_len = 0;
+    int has_otpe_alpn = 0;
 
-    if (tls_peek_clienthello(client, sni, sizeof(sni), ext_data, sizeof(ext_data), &ext_len) < 0) {
+    if (tls_peek_clienthello(client, sni, sizeof(sni), &has_otpe_alpn) < 0) {
         handle_fallback(client, NULL);
         return;
     }
 
-    int is_ours = 0;
-    int verify_result = -1;
-    if (g_server_privkey && ext_len >= OTPE_EXT_DATA_SIZE) {
-        verify_result = crypto_verify_extension(g_server_privkey, ext_data, ext_len);
-        if (verify_result == 0) is_ours = 1;
-    }
-
-    if (!is_ours) {
-        printf("[fallback] verify_result=%d ext_len=%zu\n", verify_result, ext_len);
+    if (!has_otpe_alpn) {
         handle_fallback(client, sni);
         return;
     }
 
-    printf("[tid %lu] OTPE client, SNI=%s\n", (unsigned long)pthread_self(), sni);
+    printf("[tid %lu] 0TPE client, SNI=%s\n", (unsigned long)pthread_self(), sni);
 
-    otpe_tls_t* tls = otpe_tls_server(client, g_cfg.cert_file, g_cfg.key_file);
-    if (!tls) { printf("[tid %lu] TLS failed\n", (unsigned long)pthread_self()); return; }
+    otpe_tls_t* tls = otpe_tls_server(client, g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
+    if (!tls) {
+        printf("[tid %lu] TLS failed (client cert rejected?)\n", (unsigned long)pthread_self());
+        return;
+    }
     printf("[tid %lu] TLS OK\n", (unsigned long)pthread_self());
 
     uint8_t hb[OTPE_HEADER_SIZE];
@@ -212,17 +203,11 @@ int main(int argc, char** argv) {
     if (config_load_server(cfg_path, &g_cfg) != 0) {
         printf("Warning: config %s not found, using defaults\n", cfg_path);
     }
+
     signal(SIGPIPE, SIG_IGN);
     otpe_tls_init();
-    otpe_tls_server_preinit(g_cfg.cert_file, g_cfg.key_file);
-    nonce_cache_init();
+    otpe_tls_server_preinit(g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
     dns_cache_init();
-
-    if (crypto_load_private_key(g_cfg.reality_key_file, &g_server_privkey) != 0) {
-        printf("Warning: cannot load reality key %s\n", g_cfg.reality_key_file);
-    } else {
-        printf("Reality private key loaded: %s\n", g_cfg.reality_key_file);
-    }
 
     int server_sock = socket(AF_INET, SOCK_STREAM, 0);
     if (server_sock < 0) return 1;
@@ -234,11 +219,20 @@ int main(int argc, char** argv) {
     addr.sin_addr.s_addr = inet_addr(g_cfg.listen_ip);
     addr.sin_port = htons(g_cfg.listen_port);
 
-    if (bind(server_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) { perror("bind"); close(server_sock); return 1; }
-    if (listen(server_sock, 128) < 0) { perror("listen"); close(server_sock); return 1; }
+    if (bind(server_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("bind");
+        close(server_sock);
+        return 1;
+    }
+    if (listen(server_sock, 128) < 0) {
+        perror("listen");
+        close(server_sock);
+        return 1;
+    }
 
-    printf("0TPE+TLS server listening on %s:%u\n", g_cfg.listen_ip, g_cfg.listen_port);
+    printf("0TPE server listening on %s:%u\n", g_cfg.listen_ip, g_cfg.listen_port);
     printf("Fallback SNI: %s\n", g_cfg.fallback_sni);
+    printf("Client cert required (CA: %s)\n", g_cfg.ca_file);
 
     for (;;) {
         struct sockaddr_in caddr;
@@ -246,7 +240,10 @@ int main(int argc, char** argv) {
         int client = accept(server_sock, (struct sockaddr*)&caddr, &clen);
         if (client < 0) continue;
         pthread_t t;
-        if (pthread_create(&t, NULL, thread_entry, (void*)(intptr_t)client) != 0) { close(client); continue; }
+        if (pthread_create(&t, NULL, thread_entry, (void*)(intptr_t)client) != 0) {
+            close(client);
+            continue;
+        }
         pthread_detach(t);
     }
     close(server_sock);

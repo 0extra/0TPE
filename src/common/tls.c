@@ -1,6 +1,5 @@
 #include "tls.h"
 #include "tls_peek.h"
-#include "crypto.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -8,7 +7,6 @@
 #include <pthread.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-#include <openssl/rand.h>
 
 struct otpe_tls {
     SSL_CTX* ctx;
@@ -17,42 +15,37 @@ struct otpe_tls {
 };
 
 static pthread_once_t ssl_once = PTHREAD_ONCE_INIT;
-static void* g_server_pubkey = NULL;
+static void* g_client_cert = NULL;
+static void* g_client_key = NULL;
 
 static void ssl_init_fn(void) {
+#ifdef OPENSSL_IS_BORINGSSL
+    (void)0;
+#else
     SSL_library_init();
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
+#endif
 }
 
 void otpe_tls_init(void) {
     pthread_once(&ssl_once, ssl_init_fn);
 }
 
-void otpe_tls_set_server_pubkey(void* pkey) {
-    g_server_pubkey = pkey;
+void otpe_tls_set_client_cert(void* cert, void* key) {
+    g_client_cert = cert;
+    g_client_key = key;
 }
 
 static void ensure_openssl(void) {
     pthread_once(&ssl_once, ssl_init_fn);
 }
 
-static int otpe_ext_add_cb(SSL *s, unsigned int ext_type, unsigned int context,
-                           const unsigned char **out, size_t *outlen,
-                           X509 *x, size_t chainidx, int *al, void *arg) {
-    (void)s; (void)ext_type; (void)context; (void)x; (void)chainidx; (void)al; (void)arg;
-    static __thread uint8_t data[OTPE_EXT_DATA_SIZE];
-    if (!g_server_pubkey) return 0;
-    if (crypto_build_extension(g_server_pubkey, data, sizeof(data)) != 0) return 0;
-    *out = data;
-    *outlen = sizeof(data);
-    return 1;
-}
-
 static SSL_CTX* g_server_ctx = NULL;
 static pthread_mutex_t g_server_ctx_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void otpe_tls_server_preinit(const char* cert_file, const char* key_file) {
+void otpe_tls_server_preinit(const char* cert_file, const char* key_file,
+                             const char* ca_file) {
     ensure_openssl();
     pthread_mutex_lock(&g_server_ctx_lock);
     if (g_server_ctx) {
@@ -76,17 +69,27 @@ void otpe_tls_server_preinit(const char* cert_file, const char* key_file) {
         return;
     }
 
+    if (SSL_CTX_load_verify_locations(ctx, ca_file, NULL) != 1) {
+        SSL_CTX_free(ctx);
+        pthread_mutex_unlock(&g_server_ctx_lock);
+        return;
+    }
+
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+    SSL_CTX_set_verify_depth(ctx, 4);
+
     g_server_ctx = ctx;
     pthread_mutex_unlock(&g_server_ctx_lock);
 }
 
-otpe_tls_t* otpe_tls_server(int fd, const char* cert_file, const char* key_file) {
+otpe_tls_t* otpe_tls_server(int fd, const char* cert_file, const char* key_file,
+                            const char* ca_file) {
     ensure_openssl();
 
     pthread_mutex_lock(&g_server_ctx_lock);
     if (!g_server_ctx) {
         pthread_mutex_unlock(&g_server_ctx_lock);
-        otpe_tls_server_preinit(cert_file, key_file);
+        otpe_tls_server_preinit(cert_file, key_file, ca_file);
         pthread_mutex_lock(&g_server_ctx_lock);
     }
     SSL_CTX* ctx = g_server_ctx;
@@ -124,20 +127,38 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni) {
     SSL_CTX_set_verify(t->ctx, SSL_VERIFY_NONE, NULL);
 
     SSL_CTX_set1_groups_list(t->ctx, "X25519:P-256:P-384");
+
+#ifdef OPENSSL_IS_BORINGSSL
+    SSL_CTX_set_cipher_list(t->ctx,
+        "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:"
+        "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
+        "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
+        "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305");
+#else
     SSL_CTX_set_ciphersuites(t->ctx,
-        "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256");
+        "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256");
     SSL_CTX_set_cipher_list(t->ctx,
         "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
         "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
         "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305");
+#endif
+
     SSL_CTX_set1_sigalgs_list(t->ctx,
         "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:"
         "ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:"
         "rsa_pss_rsae_sha512:rsa_pkcs1_sha512");
 
-    SSL_CTX_add_custom_ext(t->ctx, OTPE_EXT_TYPE,
-                           SSL_EXT_CLIENT_HELLO,
-                           otpe_ext_add_cb, NULL, NULL, NULL, NULL);
+    static const uint8_t alpn_list[] = {
+        2, 'h', '2',
+        8, 'h', 't', 't', 'p', '/', '1', '.', '1',
+        4, '0', 't', 'p', 'e'
+    };
+    SSL_CTX_set_alpn_protos(t->ctx, alpn_list, sizeof(alpn_list));
+
+    if (g_client_cert && g_client_key) {
+        SSL_CTX_use_certificate(t->ctx, (X509*)g_client_cert);
+        SSL_CTX_use_PrivateKey(t->ctx, (EVP_PKEY*)g_client_key);
+    }
 
     t->ssl = SSL_new(t->ctx);
     if (!t->ssl) { SSL_CTX_free(t->ctx); free(t); return NULL; }
@@ -164,9 +185,7 @@ void otpe_tls_free(otpe_tls_t* t) {
         SSL_shutdown(t->ssl);
         SSL_free(t->ssl);
     }
-    if (t->ctx && t->owns_ctx) {
-        SSL_CTX_free(t->ctx);
-    }
+    if (t->ctx && t->owns_ctx) SSL_CTX_free(t->ctx);
     free(t);
 }
 
@@ -200,10 +219,5 @@ ssize_t otpe_tls_recv_all(otpe_tls_t* t, void* buf, size_t len) {
     return (ssize_t)got;
 }
 
-int otpe_tls_get_fd(otpe_tls_t* t) {
-    return SSL_get_fd(t->ssl);
-}
-
-int otpe_tls_pending(otpe_tls_t* t) {
-    return SSL_pending(t->ssl);
-}
+int otpe_tls_get_fd(otpe_tls_t* t) { return SSL_get_fd(t->ssl); }
+int otpe_tls_pending(otpe_tls_t* t) { return SSL_pending(t->ssl); }

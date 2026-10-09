@@ -8,120 +8,106 @@ A lightweight transport protocol over TLS with camouflage to a real website.
 
 ## What it is
 
-0TPE is a lightweight transport protocol for building secure proxy tunnels. It runs on top of TLS and uses an active-probing defense mechanism — from the outside, traffic looks like a normal HTTPS session to a well-known site (default: `www.microsoft.com`). An outside observer probing the server receives the **real response from Microsoft**, so the protocol cannot be distinguished from a legitimate mirror.
+0TPE is a lightweight transport protocol for building secure proxy tunnels. It runs on top of **BoringSSL** — the same TLS stack used by Chrome — and authenticates clients with standard **TLS client certificates**. From the outside, traffic looks like a normal HTTPS session to a well-known site (default: `www.microsoft.com`). An outside observer probing the server receives the **real response from Microsoft**, so the protocol cannot be distinguished from a legitimate mirror.
 
 ## Use cases
 
-- **Privacy on untrusted networks** — public Wi-Fi, hotels, airports, corporate networks
+- **Privacy on untrusted networks** — public Wi-Fi, hotels, airports
 - **Remote access** — reach your home or office network from anywhere
-- **Geo-restrictions** — access streaming services and websites as if you were in another country
+- **Geo-restrictions** — access streaming services as if you were in another country
 - **Development and testing** — view your services from different regions
-- **Secure tunneling between your own devices** — connect your laptop to your home server
+- **Secure tunneling between your own devices**
 
 ## Features
 
 - Custom transport protocol with a minimal **16-byte header**
-- TLS wrapper on top of OpenSSL
-- X25519-encrypted handshake — only a matching client is recognized by the server
-- Transparent fallback: unrecognized connections are proxied to a real decoy site
-- Anti-replay: HMAC with timestamp ±30s + in-memory nonce cache (4096 entries, 60s window)
+- **BoringSSL** — same TLS library Chrome uses
+- **Mutual authentication** via TLS client certificates signed by an internal CA
+- Client recognition via **ALPN** (`h2,http/1.1,0tpe`)
+- Transparent fallback: unrecognized connections proxied to a real decoy site
 - SOCKS5 (TCP + UDP ASSOCIATE) and HTTP CONNECT on the client
-- Multi-client server and client (pthreads, no thread count limit)
-- DNS cache (30-second TTL, 256 hosts) — parallel requests don't serialize on `getaddrinfo`
-- 10-second idle timeout in relay — stuck connections are cleaned up automatically
-- Config file — change ports/SNI/token without recompiling
-- IPv4 + IPv6 with automatic fallback (300ms IPv6 timeout, 500ms IPv4 timeout)
+- Multi-client server and client (pthreads)
+- DNS cache (30-second TTL, 256 hosts)
+- 10-second idle timeout in relay
+- Config file — change ports/SNI without recompiling
+- IPv4 + IPv6 with automatic fallback
 - Link generator (`otpe://...`)
-- Fuzz-tested TLS ClientHello parser (63M executions, 0 crashes)
+- Fuzz-tested ClientHello parser
 - GitHub Actions CI
-- Docker multi-stage build (31.9 MB image)
+- Docker multi-stage build
 
 ## Benchmarks (loopback)
-
-Tested on a laptop with a modern x86_64 CPU, OpenSSL 3.x, TCP_NODELAY enabled.
 
 ### RTT (round-trip time, 1000 iterations)
 
 ```
 === 0TPE RTT benchmark ===
 iterations: 1000 (ok=1000)
-min:  0.025 ms
-p50:  0.025 ms
+min:  0.024 ms
+p50:  0.024 ms
 p95:  0.039 ms
-p99:  0.062 ms
-max:  0.453 ms
-avg:  0.029 ms
+p99:  0.057 ms
+max:  0.295 ms
+avg:  0.028 ms
 ```
 
-29 microseconds average RTT over TLS + 0TPE + relay on loopback.
-
-### Throughput (single stream)
-
-```
-=== 0TPE throughput benchmark ===
-raw bytes:   104858154
-payload:     104857600
-elapsed:     7.200 s
-throughput:  13.89 MB/s (111.11 Mbps)
-```
-
-111 Mbps single-stream throughput. On a real VPS with a gigabit uplink, 100–500 Mbps end-to-end is realistic.
+28 microseconds average RTT over BoringSSL + 0TPE + relay on loopback.
 
 ### Parallel connections
 
-Real-world performance through the SOCKS5 proxy:
+20 concurrent curl requests through the SOCKS5 proxy:
 
-| Scenario | Wall clock |
-|---|---|
-| 1 curl to a target site | 0.6 s |
-| 3 parallel curls | 1.6 s |
-| 20 parallel curls | ~11 s (limited by upstream server, not by 0TPE) |
+```
+20 parallel: OK=20 FAIL=0
+2.748 total
+```
 
-With 20 parallel requests, ~14–18 succeed within 1 second. The remaining connections wait for the upstream server's TLS handshake; our **10-second idle timeout** cleans them up, so the whole test completes in 11 seconds instead of 121.
+20/20 in 2.7 seconds. Down from 11 seconds in v0.1.3.
 
 ## Dependencies
 
 - GCC
-- OpenSSL 3.x (dev headers)
-- pthreads (built into glibc)
+- BoringSSL (built from source)
+- CMake, Ninja, Go (for building BoringSSL)
+- pthreads
 
 ### Ubuntu / Debian / Mint
 
 ```bash
 sudo apt update
-sudo apt install build-essential libssl-dev
+sudo apt install build-essential cmake ninja-build golang
 ```
 
 ### Fedora / RHEL / CentOS
 
 ```bash
-sudo dnf install gcc make openssl-devel
+sudo dnf install gcc make cmake ninja-build golang
 ```
 
 ### Arch / Manjaro
 
 ```bash
-sudo pacman -S base-devel openssl
+sudo pacman -S base-devel cmake ninja go
 ```
 
 ### Alpine
 
 ```bash
-sudo apk add build-base openssl-dev
+sudo apk add build-base cmake ninja go
 ```
 
 ## Build
 
 ```bash
-# 1. Generate TLS certificate
-chmod +x scripts/gen_cert.sh
-./scripts/gen_cert.sh
+# 1. Build BoringSSL (only once, ~15 minutes)
+chmod +x scripts/build_boringssl.sh
+./scripts/build_boringssl.sh
 
-# 2. Generate X25519 keys
-chmod +x scripts/gen_keys.sh
-./scripts/gen_keys.sh
+# 2. Generate internal CA, server certificate, and client certificate
+chmod +x scripts/gen_ca.sh
+./scripts/gen_ca.sh
 
-# 3. Build everything
+# 3. Build 0TPE
 make clean && make && make bench
 ```
 
@@ -132,7 +118,7 @@ Binaries produced:
 - `otpe-ping` — ping over 0TPE
 - `otpe-genlink` — generate `otpe://` links
 - `otpe-test` — protocol unit tests
-- `otpe-test-crypto` — X25519 + HMAC + replay tests
+- `otpe-test-crypto` — X25519 DH tests
 - `otpe-test-udp` — end-to-end UDP over 0TPE test
 - `bench-rtt` — RTT benchmark
 - `bench-throughput` — throughput benchmark
@@ -140,15 +126,13 @@ Binaries produced:
 ## VPS installation
 
 ```bash
-# On VPS (Ubuntu 22.04+)
-sudo apt update && sudo apt install build-essential libssl-dev git
+sudo apt update && sudo apt install build-essential cmake ninja-build golang git
 git clone https://github.com/0extra/0TPE.git
 cd 0TPE
-./scripts/gen_cert.sh
-./scripts/gen_keys.sh
+./scripts/build_boringssl.sh
+./scripts/gen_ca.sh
 make
 
-# Run as a systemd service
 sudo tee /etc/systemd/system/0tpe-server.service > /dev/null <<EOF
 [Unit]
 Description=0TPE Server
@@ -176,11 +160,14 @@ docker compose up -d
 docker compose logs -f
 ```
 
-**Don't forget** to copy `keys/server.pub` to the client machine — it is needed for the handshake.
+**Copy these files to each client machine:**
+
+- `certs/client.crt` — client certificate
+- `certs/client.key` — client private key
+
+Keep `certs/ca.key` on the server only.
 
 ## Opening the port on the VPS
-
-If you use ufw:
 
 ```bash
 sudo ufw allow 8443/tcp
@@ -192,18 +179,19 @@ Or via iptables:
 sudo iptables -A INPUT -p tcp --dport 8443 -j ACCEPT
 ```
 
-## Client configuration
+## Client setup
 
-Copy `keys/server.pub` into the `keys/` folder on the client, edit `0tpe.conf`:
+Copy `certs/client.crt` and `certs/client.key` into the `certs/` folder on the client. Edit `0tpe.conf`:
 
 ```ini
-server_ip           = YOUR_VPS_IP
-server_port         = 8443
-socks_port          = 1080
-http_port           = 8080
-sni                 = www.microsoft.com
-token               = 550e8400e29b41d4a716446655440000
-reality_pubkey_file = keys/server.pub
+server_ip        = YOUR_VPS_IP
+server_port      = 8443
+socks_port       = 1080
+http_port        = 8080
+sni              = www.microsoft.com
+token            = 550e8400e29b41d4a716446655440000
+client_cert_file = certs/client.crt
+client_key_file  = certs/client.key
 ```
 
 Run:
@@ -218,7 +206,7 @@ You will see:
 0TPE client -> <IP>:8443 (SNI=www.microsoft.com)
   SOCKS5 on 127.0.0.1:1080
   HTTP   on 127.0.0.1:8080
-  Reality pubkey: keys/server.pub
+  Client cert: certs/client.crt
   TLS retries: 3
   UDP    on 127.0.0.1:<port>
 ```
@@ -231,7 +219,7 @@ You will see:
 curl -s --socks5-hostname 127.0.0.1:1080 https://example.com -o /tmp/page.html
 ```
 
-**Important:** use `--socks5-hostname`, not `--socks5`. The former passes the hostname to the server, which then resolves IPv4/IPv6 itself.
+Use `--socks5-hostname`, not `--socks5`. The former passes the hostname to the server, which resolves IPv4/IPv6 itself.
 
 ### curl through HTTP CONNECT
 
@@ -249,8 +237,9 @@ curl -s --proxy http://127.0.0.1:8080 https://example.com -o /tmp/page.html
 
 Settings → Network Settings → Manual proxy configuration:
 
-- SOCKS Host: `127.0.0.1`, Port: `1080`, SOCKS v5, **check "Proxy DNS when using SOCKS v5"** — mandatory
-- or HTTP Proxy: `127.0.0.1:8080`, "Also use for HTTPS" ✅
+- SOCKS Host: `127.0.0.1`, Port: `1080`, SOCKS v5
+- Check "Proxy DNS when using SOCKS v5"
+- or HTTP Proxy: `127.0.0.1:8080`, "Also use for HTTPS"
 
 ### Chromium
 
@@ -291,7 +280,12 @@ git -c http.proxy=socks5h://127.0.0.1:1080 clone https://github.com/user/repo.gi
 
 ```bash
 ./otpe-genlink 0tpe.conf MyServer
-# otpe://550e8400e29b41d4@127.0.0.1:8443?sni=www.microsoft.com#MyServer
+```
+
+Produces a link like:
+
+```
+otpe://550e8400e29b41d4@127.0.0.1:8443?sni=www.microsoft.com#MyServer
 ```
 
 ## Testing
@@ -299,9 +293,10 @@ git -c http.proxy=socks5h://127.0.0.1:1080 clone https://github.com/user/repo.gi
 ```bash
 make clean && make
 
-./otpe-test         # protocol frame encode/decode
-./otpe-test-crypto  # X25519, HMAC, replay rejection
-./otpe-test-udp     # UDP over 0TPE (needs server + client running)
+./otpe-test
+./otpe-test-crypto
+./otpe-test-udp
+./otpe-ping 127.0.0.1 8443 20
 ```
 
 Fuzzing:
@@ -322,38 +317,35 @@ make bench
 ## Architecture
 
 ```
-[Browser] --SOCKS5/HTTP--> [otpe-client] --0TPE+TLS+Reality--> [otpe-server] --TCP/UDP--> [target]
+[Browser] --SOCKS5/HTTP--> [otpe-client] --0TPE+BoringSSL--> [otpe-server] --TCP/UDP--> [target]
                               (your PC)         (wire)              (VPS)
 ```
 
 - **otpe-client** listens on `127.0.0.1:1080` (SOCKS5), `127.0.0.1:8080` (HTTP CONNECT), and a dynamic UDP port
 - Sends `CONNECT host:port` or `UDP host:port` commands via the 0TPE header
-- **otpe-server** connects to the target and relays bytes in both directions with:
-  - 10-second idle timeout (kill stuck connections)
-  - 5-second grace timeout after one side closes
+- **otpe-server** connects to the target and relays bytes in both directions with a 10-second idle timeout and a 5-second grace timeout
 
-## How Reality-lite works
+## How it works
 
-1. The client sends a TLS ClientHello with SNI=`www.microsoft.com` and a custom extension `0xFFA0`
-2. The extension contains: ephemeral X25519 public key + nonce + HMAC-SHA256 (with timestamp)
-3. The server reads the ClientHello **before** the TLS handshake via `MSG_PEEK` and verifies the HMAC
-4. If HMAC matches → the server acts as a 0TPE server
-5. If not → the server **transparently proxies** the connection to the real `www.microsoft.com:443`
-6. An outside observer sees a real TLS session, a real certificate, a real response — nothing distinguishes it from a legitimate mirror
+1. Client connects to the server over TLS (BoringSSL)
+2. Client sends a **client certificate** signed by the internal CA
+3. Client also advertises **ALPN** `h2,http/1.1,0tpe` — the server uses this to recognize it as a 0TPE client
+4. If both checks pass, the server enters 0TPE mode
+5. If either fails, the server **transparently proxies** the connection to `www.microsoft.com:443`
+6. An outside observer sees a real TLS session with a real Microsoft certificate
 
 ## Security
 
-- X25519 server keys **must not be published**. `keys/server.key` — server-side only
-- `keys/server.pub` — safe to distribute to clients
+- `certs/ca.key` — CA private key, keep it on the server only
+- `certs/client.key` — client private key, keep it on client machines only
+- `certs/server.key` — server private key, keep it on the server
 - Token in `0tpe.conf` — not critical, but better not to publish
-- Certificate (`certs/server.crt`) — self-signed, the client does not verify it, because camouflage is provided by the Reality-lite extension
 
 ## Limitations
 
-- Against a **targeted** DPI with Chrome fingerprinting it may not work — OpenSSL cannot fully reproduce Chrome's ClientHello. Requires BoringSSL or uTLS.
-- No multiplexing — each connection is a new TLS session. Attempts to implement MUX over OpenSSL failed (see `docs/CODE_AUDIT.md`).
-- UDP relay is stateless per datagram — long-lived UDP flows (QUIC, VoIP) may not work efficiently.
-- Idle timeout is 10 seconds: some applications that hold idle connections (push notifications, keep-alives) will see them dropped and reconnect.
+- No multiplexing — each connection opens a new TLS session
+- UDP relay is stateless per datagram
+- Idle timeout is 10 seconds — some applications that hold idle connections will see them dropped and reconnect
 
 ## Diagnostics
 
@@ -379,24 +371,24 @@ issuer=C=US, O=Microsoft Corporation, CN=Microsoft TLS G2 RSA CA OCSP 04
 
 ### Server logs
 
-- `[tid ...] OTPE client, SNI=...` — our client recognized
+- `[tid ...] 0TPE client, SNI=...` — client recognized
 - `[UDP tid ...] -> 8.8.8.8:53 (29 bytes)` — UDP relay working
 - `[fallback] -> www.microsoft.com:443` — unrecognized connection redirected to fallback
-- `[relay] idle timeout (10009 ms no data)` — stuck connection cleaned up (normal)
+- `[relay] idle timeout (10009 ms no data)` — stuck connection cleaned up
+- `[tid ...] TLS failed (client cert rejected?)` — client certificate not signed by CA
 
 ## Project structure
 
 ```
 .github/workflows/   — CI
 bench/               — RTT and throughput benchmarks
-certs/               — TLS certificate (generated)
+certs/               — CA, server, client certificates (generated)
 docs/                — SPEC.md, THREAT_MODEL.md, CODE_AUDIT.md
 fuzz/                — libFuzzer target + corpus
 include/             — header files
-keys/                — X25519 keys (generated)
-scripts/             — gen_cert.sh, gen_keys.sh, build_release.sh
+scripts/             — build_boringssl.sh, gen_ca.sh, build_release.sh
 src/
-  common/            — shared code (protocol, tls, relay, dns_cache, ...)
+  common/            — shared code
   client/            — client entry point
   server/            — server entry point
   ping/              — otpe-ping
@@ -406,12 +398,11 @@ tests/               — unit tests
 Makefile
 README.md
 LICENSE
-COPYING
 ```
 
 ## Name
 
-**0TPE** is a short, unique name. No expansion — it's just the project's identifier. The leading `0` comes from the author's handle `0extra`.
+**0TPE** — a short, unique identifier. The leading `0` comes from the author's handle.
 
 ## License
 

@@ -30,8 +30,7 @@ cp .dockerignore "$SERVER_DIR/"
 cp docker-compose.yml "$SERVER_DIR/"
 cp -r src include Makefile "$SERVER_DIR/"
 
-cp scripts/gen_cert.sh "$SERVER_DIR/scripts/"
-cp scripts/gen_keys.sh "$SERVER_DIR/scripts/"
+cp scripts/gen_ca.sh "$SERVER_DIR/scripts/"
 
 cat > "$SERVER_DIR/start.sh" << 'STARTEOF'
 #!/bin/bash

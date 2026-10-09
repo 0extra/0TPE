@@ -6,11 +6,14 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <openssl/pem.h>
+#include <openssl/x509.h>
+#include <openssl/evp.h>
 #include "protocol.h"
 #include "relay.h"
 #include "tls.h"
-#include "crypto.h"
 #include "config.h"
+#include "dns_cache.h"
 
 static uint64_t now_ns(void) {
     struct timespec ts;
@@ -28,23 +31,37 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    void* pubkey = NULL;
-    if (crypto_load_public_key(cfg.reality_pubkey_file, &pubkey) != 0) {
-        fprintf(stderr, "cannot load pubkey\n");
+    X509* cert = NULL;
+    EVP_PKEY* key = NULL;
+
+    FILE* cf = fopen(cfg.client_cert_file, "r");
+    if (cf) { cert = PEM_read_X509(cf, NULL, NULL, NULL); fclose(cf); }
+    FILE* kf = fopen(cfg.client_key_file, "r");
+    if (kf) { key = PEM_read_PrivateKey(kf, NULL, NULL, NULL); fclose(kf); }
+    if (!cert || !key) {
+        fprintf(stderr, "cannot load client cert/key\n");
         return 1;
     }
-    otpe_tls_set_server_pubkey(pubkey);
+    otpe_tls_set_client_cert(cert, key);
     otpe_tls_init();
+    dns_cache_init();
 
     uint8_t token[OTPE_TOKEN_SIZE];
     config_token_to_bytes(cfg.token, token, OTPE_TOKEN_SIZE);
 
-    int sock = otpe_connect_timeout(cfg.server_ip, cfg.server_port, 5000);
-    if (sock < 0) { fprintf(stderr, "connect failed\n"); return 1; }
+    int sock = otpe_connect_timeout(cfg.server_ip, cfg.server_port);
+    if (sock < 0) {
+        fprintf(stderr, "connect failed\n");
+        return 1;
+    }
     otpe_set_tcp_nodelay(sock);
 
     otpe_tls_t* tls = otpe_tls_client(sock, cfg.sni);
-    if (!tls) { fprintf(stderr, "TLS failed\n"); close(sock); return 1; }
+    if (!tls) {
+        fprintf(stderr, "TLS handshake failed\n");
+        close(sock);
+        return 1;
+    }
 
     const char* host = "cachefly.cachefly.net";
     uint16_t port = 80;

@@ -10,7 +10,7 @@ static uint16_t rd16(const uint8_t* p) { return (uint16_t)((p[0] << 8) | p[1]); 
 static int has_otpe_in_alpn(const uint8_t* p, size_t len) {
     if (len < 2) return 0;
     uint16_t list_len = rd16(p);
-    if (list_len + 2 > len) return 0;
+    if ((size_t)list_len + 2 > len) return 0;
     size_t pos = 2;
     while (pos + 1 < len && pos < (size_t)(2 + list_len)) {
         uint8_t alen = p[pos];

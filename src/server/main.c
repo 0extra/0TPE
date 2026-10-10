@@ -18,6 +18,7 @@
 #include "config.h"
 #include "dns_cache.h"
 #include "udp_stateful.h"
+#include "log.h"
 
 static otpe_server_config_t g_cfg;
 
@@ -27,10 +28,10 @@ static int connect_target(const char* host, uint16_t port) {
 
 static void handle_fallback(int client, const char* sni) {
     const char* target_host = (sni && *sni) ? sni : g_cfg.fallback_sni;
-    printf("[fallback] -> %s:443\n", target_host);
+    log_info("[fallback] -> %s:443", target_host);
     int remote = connect_target(target_host, 443);
     if (remote < 0) {
-        printf("[fallback] cannot connect to %s:443\n", target_host);
+        log_warn("[fallback] cannot connect to %s:443", target_host);
         close(client);
         return;
     }
@@ -62,7 +63,10 @@ static void process_udp_payload(udp_target_t* targets,
     if (p + dlen > len) return;
 
     int idx = udp_state_get_or_create(targets, host, port);
-    if (idx < 0) return;
+    if (idx < 0) {
+        log_warn("[udp] cannot reach %s:%u", host, port);
+        return;
+    }
 
     send(targets[idx].fd, payload + p, dlen, 0);
     targets[idx].last_seen = time(NULL);
@@ -157,14 +161,16 @@ static void handle_client(int client) {
         return;
     }
 
-    printf("[tid %lu] 0TPE client, SNI=%s\n", (unsigned long)pthread_self(), sni);
+    log_info("[tid %lu] 0TPE client, SNI=%s",
+             (unsigned long)pthread_self(), sni);
 
     otpe_tls_t* tls = otpe_tls_server(client, g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
     if (!tls) {
-        printf("[tid %lu] TLS failed (client cert rejected?)\n", (unsigned long)pthread_self());
+        log_warn("[tid %lu] TLS failed (client cert rejected?)",
+                 (unsigned long)pthread_self());
         return;
     }
-    printf("[tid %lu] TLS OK\n", (unsigned long)pthread_self());
+    log_debug("[tid %lu] TLS OK", (unsigned long)pthread_self());
 
     uint8_t hb[OTPE_HEADER_SIZE];
     if (otpe_tls_recv_all(tls, hb, OTPE_HEADER_SIZE) != OTPE_HEADER_SIZE) {
@@ -228,17 +234,21 @@ static void handle_client(int client) {
         memcpy(host, payload + 2, hlen);
         host[hlen] = '\0';
 
-        printf("[tid %lu] CONNECT %s:%u\n", (unsigned long)pthread_self(), host, port);
+        log_info("[tid %lu] CONNECT %s:%u",
+                 (unsigned long)pthread_self(), host, port);
         int target = connect_target(host, port);
         if (target < 0) {
+            log_warn("[tid %lu] cannot connect %s:%u",
+                     (unsigned long)pthread_self(), host, port);
             otpe_tls_free(tls);
             return;
         }
         otpe_set_tcp_nodelay(target);
-        printf("[tid %lu] up %s:%u\n", (unsigned long)pthread_self(), host, port);
+        log_debug("[tid %lu] up %s:%u",
+                  (unsigned long)pthread_self(), host, port);
         otpe_relay_tls_bidirectional(tls, target);
         close(target);
-        printf("[tid %lu] closed\n", (unsigned long)pthread_self());
+        log_debug("[tid %lu] closed", (unsigned long)pthread_self());
         otpe_tls_free(tls);
         return;
     }
@@ -278,6 +288,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    int lvl = log_level_from_string(g_cfg.log_level);
+    if (lvl < 0) {
+        fprintf(stderr, "config: invalid log_level '%s'\n", g_cfg.log_level);
+        return 1;
+    }
+    log_set_level((log_level_t)lvl);
+
     signal(SIGPIPE, SIG_IGN);
     otpe_tls_init();
     otpe_tls_server_preinit(g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
@@ -304,9 +321,10 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    printf("0TPE server listening on %s:%u\n", g_cfg.listen_ip, g_cfg.listen_port);
-    printf("Fallback SNI: %s\n", g_cfg.fallback_sni);
-    printf("Client cert required (CA: %s)\n", g_cfg.ca_file);
+    log_info("0TPE server listening on %s:%u", g_cfg.listen_ip, g_cfg.listen_port);
+    log_info("Fallback SNI: %s", g_cfg.fallback_sni);
+    log_info("Client cert required (CA: %s)", g_cfg.ca_file);
+    log_info("Log level: %s", log_level_to_string(log_get_level()));
 
     for (;;) {
         struct sockaddr_in caddr;

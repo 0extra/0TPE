@@ -20,6 +20,7 @@
 #include "http_proxy.h"
 #include "config.h"
 #include "dns_cache.h"
+#include "log.h"
 
 #define UDP_IDLE_TIMEOUT 60
 #define MAX_UDP_SESSIONS 32
@@ -83,7 +84,7 @@ static otpe_tls_t* open_tls_with_retry(int* server_fd_out, const char* tag) {
         if (attempt < TLS_MAX_RETRIES) usleep(TLS_RETRY_DELAY_MS * 1000);
     }
 
-    fprintf(stderr, "[%s] TLS handshake failed after %d attempts\n", tag, TLS_MAX_RETRIES);
+    log_error("[%s] TLS handshake failed after %d attempts", tag, TLS_MAX_RETRIES);
     return NULL;
 }
 
@@ -101,26 +102,26 @@ static void establish_tunnel(int browser_fd, const char* host, uint16_t port, co
             connected = 1;
             break;
         }
-        fprintf(stderr, "[%s] CONNECT failed (attempt %d) for %s:%u\n", tag, attempt, host, port);
+        log_warn("[%s] CONNECT failed (attempt %d) for %s:%u", tag, attempt, host, port);
         if (attempt < 2) usleep(TLS_RETRY_DELAY_MS * 1000);
     }
 
     if (!connected) {
-        fprintf(stderr, "[%s] CONNECT failed permanently for %s:%u\n", tag, host, port);
+        log_error("[%s] CONNECT failed permanently for %s:%u", tag, host, port);
         otpe_tls_free(tls);
         close(server_fd);
         close(browser_fd);
         return;
     }
 
-    printf("[%s] %s:%u\n", tag, host, port);
+    log_info("[%s] %s:%u", tag, host, port);
 
     long total = otpe_relay_tls_bidirectional(tls, browser_fd);
 
     if (total < 0) {
-        fprintf(stderr, "[%s] relay error for %s:%u\n", tag, host, port);
+        log_warn("[%s] relay error for %s:%u", tag, host, port);
     } else {
-        printf("[%s] closed %s:%u (%ld bytes)\n", tag, host, port, total);
+        log_debug("[%s] closed %s:%u (%ld bytes)", tag, host, port, total);
     }
 
     otpe_tls_free(tls);
@@ -141,7 +142,7 @@ static void* socks5_thread(void* arg) {
     if (cmd == 0x01) {
         establish_tunnel(fd, host, port, "SOCKS5");
     } else {
-        printf("[SOCKS5] UDP ASSOCIATE -> 127.0.0.1:%u\n", g_udp_port);
+        log_info("[SOCKS5] UDP ASSOCIATE -> 127.0.0.1:%u", g_udp_port);
         uint8_t b;
         while (read(fd, &b, 1) > 0) {}
         close(fd);
@@ -284,7 +285,7 @@ static udp_session_t* udp_find_or_create(struct sockaddr_storage* src, socklen_t
     s->alive = 1;
 
     if (pthread_create(&s->tid, NULL, udp_session_thread, s) != 0) {
-        fprintf(stderr, "udp: pthread_create failed\n");
+        log_error("udp: pthread_create failed");
         s->alive = 0;
         s->in_use = 0;
         otpe_tls_free(s->tls);
@@ -309,7 +310,7 @@ static void* udp_listener_thread(void* arg) {
     if (getsockname(fd, (struct sockaddr*)&addr, &alen) < 0) { close(fd); return NULL; }
     g_udp_port = ntohs(addr.sin_port);
     g_udp_socket = fd;
-    printf("  UDP    on 127.0.0.1:%u\n", g_udp_port);
+    log_info("  UDP    on 127.0.0.1:%u", g_udp_port);
 
     uint8_t buf[65540];
     while (!g_shutdown) {
@@ -429,29 +430,37 @@ int main(int argc, char** argv) {
     if (config_validate_client(&g_cfg) != 0) {
         return 1;
     }
+
+    int lvl = log_level_from_string(g_cfg.log_level);
+    if (lvl < 0) {
+        fprintf(stderr, "config: invalid log_level '%s'\n", g_cfg.log_level);
+        return 1;
+    }
+    log_set_level((log_level_t)lvl);
+
     config_token_to_bytes(g_cfg.token, g_token, OTPE_TOKEN_SIZE);
 
     FILE* certf = fopen(g_cfg.client_cert_file, "r");
     if (!certf) {
-        printf("Error: cannot open %s\n", g_cfg.client_cert_file);
+        log_error("cannot open %s", g_cfg.client_cert_file);
         return 1;
     }
     g_client_cert = PEM_read_X509(certf, NULL, NULL, NULL);
     fclose(certf);
     if (!g_client_cert) {
-        printf("Error: invalid client certificate\n");
+        log_error("invalid client certificate");
         return 1;
     }
 
     FILE* keyf = fopen(g_cfg.client_key_file, "r");
     if (!keyf) {
-        printf("Error: cannot open %s\n", g_cfg.client_key_file);
+        log_error("cannot open %s", g_cfg.client_key_file);
         return 1;
     }
     g_client_key = PEM_read_PrivateKey(keyf, NULL, NULL, NULL);
     fclose(keyf);
     if (!g_client_key) {
-        printf("Error: invalid client key\n");
+        log_error("invalid client key");
         return 1;
     }
 
@@ -466,13 +475,14 @@ int main(int argc, char** argv) {
     int http_fd = make_listen(g_cfg.http_port);
     if (http_fd < 0) { perror("bind http"); close(socks_fd); return 1; }
 
-    printf("0TPE client -> %s:%u (SNI=%s)\n",
-           g_cfg.server_ip, g_cfg.server_port, g_cfg.sni);
-    printf("  SOCKS5 on 127.0.0.1:%u\n", g_cfg.socks_port);
-    printf("  HTTP   on 127.0.0.1:%u\n", g_cfg.http_port);
-    printf("  CA file: %s\n", g_cfg.ca_file);
-    printf("  Client cert: %s\n", g_cfg.client_cert_file);
-    printf("  TLS retries: %d\n", TLS_MAX_RETRIES);
+    log_info("0TPE client -> %s:%u (SNI=%s)",
+             g_cfg.server_ip, g_cfg.server_port, g_cfg.sni);
+    log_info("  SOCKS5 on 127.0.0.1:%u", g_cfg.socks_port);
+    log_info("  HTTP   on 127.0.0.1:%u", g_cfg.http_port);
+    log_info("  CA file: %s", g_cfg.ca_file);
+    log_info("  Client cert: %s", g_cfg.client_cert_file);
+    log_info("  TLS retries: %d", TLS_MAX_RETRIES);
+    log_info("  Log level: %s", log_level_to_string(log_get_level()));
 
     pthread_t udp_tid;
     pthread_create(&udp_tid, NULL, udp_listener_thread, NULL);

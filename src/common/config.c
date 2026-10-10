@@ -65,6 +65,13 @@ static int validate_token_hex(const char* token) {
     return nibbles >= OTPE_TOKEN_SIZE * 2 ? 0 : -1;
 }
 
+static int valid_log_level(const char* s) {
+    return s && (strcmp(s, "debug") == 0 ||
+                 strcmp(s, "info")  == 0 ||
+                 strcmp(s, "warn")  == 0 ||
+                 strcmp(s, "error") == 0);
+}
+
 int config_load_server(const char* path, otpe_server_config_t* out) {
     memset(out, 0, sizeof(*out));
     strcpy(out->listen_ip, "0.0.0.0");
@@ -169,6 +176,10 @@ int config_validate_server(const otpe_server_config_t* cfg) {
         fprintf(stderr, "config: ca_file not readable: %s\n", cfg->ca_file);
         return -1;
     }
+    if (!valid_log_level(cfg->log_level)) {
+        fprintf(stderr, "config: invalid log_level '%s' (use: debug, info, warn, error)\n", cfg->log_level);
+        return -1;
+    }
     return 0;
 }
 
@@ -200,6 +211,10 @@ int config_validate_client(const otpe_client_config_t* cfg) {
     }
     if (!file_readable(cfg->client_key_file)) {
         fprintf(stderr, "config: client_key_file not readable: %s\n", cfg->client_key_file);
+        return -1;
+    }
+    if (!valid_log_level(cfg->log_level)) {
+        fprintf(stderr, "config: invalid log_level '%s' (use: debug, info, warn, error)\n", cfg->log_level);
         return -1;
     }
     return 0;

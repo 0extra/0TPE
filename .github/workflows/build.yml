@@ -29,11 +29,9 @@ jobs:
       - name: Build
         run: make clean && make
 
-      - name: Test protocol
-        run: ./otpe-test
-
-      - name: Test crypto
-        run: ./otpe-test-crypto
+      - name: Run full test suite
+        run: make test
+        timeout-minutes: 5
 
   fuzz:
     runs-on: ubuntu-latest

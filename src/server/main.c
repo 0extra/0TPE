@@ -21,6 +21,8 @@
 #include "log.h"
 
 static otpe_server_config_t g_cfg;
+static int g_active_connections = 0;
+static pthread_mutex_t g_conn_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static int connect_target(const char* host, uint16_t port) {
     return otpe_connect_timeout(host, port);
@@ -276,6 +278,9 @@ static void* thread_entry(void* arg) {
     otpe_set_tcp_nodelay(client);
     handle_client(client);
     close(client);
+    pthread_mutex_lock(&g_conn_lock);
+    g_active_connections--;
+    pthread_mutex_unlock(&g_conn_lock);
     return NULL;
 }
 
@@ -324,6 +329,7 @@ int main(int argc, char** argv) {
     log_info("0TPE server listening on %s:%u", g_cfg.listen_ip, g_cfg.listen_port);
     log_info("Fallback SNI: %s", g_cfg.fallback_sni);
     log_info("Client cert required (CA: %s)", g_cfg.ca_file);
+    log_info("Max connections: %u", g_cfg.max_connections);
     log_info("Log level: %s", log_level_to_string(log_get_level()));
 
     for (;;) {
@@ -331,8 +337,22 @@ int main(int argc, char** argv) {
         socklen_t clen = sizeof(caddr);
         int client = accept(server_sock, (struct sockaddr*)&caddr, &clen);
         if (client < 0) continue;
+
+        pthread_mutex_lock(&g_conn_lock);
+        if (g_active_connections >= (int)g_cfg.max_connections) {
+            pthread_mutex_unlock(&g_conn_lock);
+            log_warn("connection limit reached (%u), rejecting", g_cfg.max_connections);
+            close(client);
+            continue;
+        }
+        g_active_connections++;
+        pthread_mutex_unlock(&g_conn_lock);
+
         pthread_t t;
         if (pthread_create(&t, NULL, thread_entry, (void*)(intptr_t)client) != 0) {
+            pthread_mutex_lock(&g_conn_lock);
+            g_active_connections--;
+            pthread_mutex_unlock(&g_conn_lock);
             close(client);
             continue;
         }

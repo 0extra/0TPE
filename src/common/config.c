@@ -39,6 +39,22 @@ static int parse_port(const char* s, uint16_t* out, const char* name) {
     return 0;
 }
 
+static int parse_u32(const char* s, uint32_t* out, const char* name,
+                     uint32_t min_v, uint32_t max_v) {
+    char* end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0') {
+        fprintf(stderr, "config: %s: invalid number '%s'\n", name, s);
+        return -1;
+    }
+    if (v < (long)min_v || v > (long)max_v) {
+        fprintf(stderr, "config: %s: out of range (%u-%u): %ld\n", name, min_v, max_v, v);
+        return -1;
+    }
+    *out = (uint32_t)v;
+    return 0;
+}
+
 static int file_readable(const char* path) {
     if (!path || !path[0]) return 0;
     FILE* f = fopen(path, "r");
@@ -76,6 +92,7 @@ int config_load_server(const char* path, otpe_server_config_t* out) {
     memset(out, 0, sizeof(*out));
     strcpy(out->listen_ip, "0.0.0.0");
     out->listen_port = 8443;
+    out->max_connections = 512;
     strcpy(out->cert_file, "certs/server.crt");
     strcpy(out->key_file, "certs/server.key");
     strcpy(out->ca_file, "certs/ca.crt");
@@ -98,6 +115,9 @@ int config_load_server(const char* path, otpe_server_config_t* out) {
         else if (strcmp(key, "listen_port")  == 0) {
             if (parse_port(value, &out->listen_port, "listen_port") < 0) { fclose(f); return -1; }
         }
+        else if (strcmp(key, "max_connections") == 0) {
+            if (parse_u32(value, &out->max_connections, "max_connections", 1, 65535) < 0) { fclose(f); return -1; }
+        }
         else if (strcmp(key, "cert_file")    == 0) strncpy(out->cert_file,  value, sizeof(out->cert_file) - 1);
         else if (strcmp(key, "key_file")     == 0) strncpy(out->key_file,   value, sizeof(out->key_file) - 1);
         else if (strcmp(key, "ca_file")      == 0) strncpy(out->ca_file,    value, sizeof(out->ca_file) - 1);
@@ -114,6 +134,7 @@ int config_load_client(const char* path, otpe_client_config_t* out) {
     out->server_port = 8443;
     out->socks_port = 1080;
     out->http_port = 8080;
+    out->max_udp_sessions = 32;
     strcpy(out->sni, "www.microsoft.com");
     strcpy(out->token, "550e8400e29b41d4a716446655440000");
     strcpy(out->ca_file, "certs/ca.crt");
@@ -143,6 +164,9 @@ int config_load_client(const char* path, otpe_client_config_t* out) {
         else if (strcmp(key, "http_port")        == 0) {
             if (parse_port(value, &out->http_port, "http_port") < 0) { fclose(f); return -1; }
         }
+        else if (strcmp(key, "max_udp_sessions") == 0) {
+            if (parse_u32(value, &out->max_udp_sessions, "max_udp_sessions", 1, 256) < 0) { fclose(f); return -1; }
+        }
         else if (strcmp(key, "sni")              == 0) strncpy(out->sni, value, sizeof(out->sni) - 1);
         else if (strcmp(key, "token")            == 0) strncpy(out->token, value, sizeof(out->token) - 1);
         else if (strcmp(key, "ca_file")          == 0) strncpy(out->ca_file, value, sizeof(out->ca_file) - 1);
@@ -162,6 +186,10 @@ int config_validate_server(const otpe_server_config_t* cfg) {
     }
     if (cfg->fallback_sni[0] == '\0') {
         fprintf(stderr, "config: fallback_sni is empty\n");
+        return -1;
+    }
+    if (cfg->max_connections < 1) {
+        fprintf(stderr, "config: max_connections must be at least 1\n");
         return -1;
     }
     if (!file_readable(cfg->cert_file)) {
@@ -197,8 +225,12 @@ int config_validate_client(const otpe_client_config_t* cfg) {
         fprintf(stderr, "config: socks_port and http_port are equal (%u)\n", cfg->socks_port);
         return -1;
     }
+    if (cfg->max_udp_sessions < 1) {
+        fprintf(stderr, "config: max_udp_sessions must be at least 1\n");
+        return -1;
+    }
     if (validate_token_hex(cfg->token) != 0) {
-        fprintf(stderr, "config: token must be %d hex chars\n", OTPE_TOKEN_SIZE * 2);
+        fprintf(stderr, "config: token must be at least %d hex chars\n", OTPE_TOKEN_SIZE * 2);
         return -1;
     }
     if (!file_readable(cfg->ca_file)) {

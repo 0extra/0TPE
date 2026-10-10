@@ -23,7 +23,7 @@
 #include "log.h"
 
 #define UDP_IDLE_TIMEOUT 60
-#define MAX_UDP_SESSIONS 32
+#define UDP_SESSIONS_HARD_MAX 256
 #define TLS_MAX_RETRIES 3
 #define TLS_RETRY_DELAY_MS 50
 
@@ -34,6 +34,7 @@ static EVP_PKEY* g_client_key = NULL;
 static uint16_t g_udp_port = 0;
 static int g_udp_socket = -1;
 static volatile int g_shutdown = 0;
+static int g_max_udp_sessions = 32;
 
 static int connect_server(void) {
     int sock = otpe_connect_timeout(g_cfg.server_ip, g_cfg.server_port);
@@ -176,7 +177,7 @@ typedef struct {
     time_t last_seen;
 } udp_session_t;
 
-static udp_session_t g_sessions[MAX_UDP_SESSIONS];
+static udp_session_t g_sessions[UDP_SESSIONS_HARD_MAX];
 static pthread_mutex_t g_sessions_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void udp_send_reply(udp_session_t* s, const uint8_t* payload, size_t len) {
@@ -242,14 +243,14 @@ static void* udp_session_thread(void* arg) {
 
 static udp_session_t* udp_find_or_create(struct sockaddr_storage* src, socklen_t src_len) {
     time_t now = time(NULL);
-    for (int i = 0; i < MAX_UDP_SESSIONS; i++) {
+    for (int i = 0; i < g_max_udp_sessions; i++) {
         udp_session_t* s = &g_sessions[i];
         if (s->in_use && s->alive && s->client_len == src_len &&
             memcmp(&s->client, src, src_len) == 0) return s;
     }
     int slot = -1;
-    for (int i = 0; i < MAX_UDP_SESSIONS; i++) if (!g_sessions[i].in_use) { slot = i; break; }
-    if (slot < 0) for (int i = 0; i < MAX_UDP_SESSIONS; i++) if (!g_sessions[i].alive) { slot = i; break; }
+    for (int i = 0; i < g_max_udp_sessions; i++) if (!g_sessions[i].in_use) { slot = i; break; }
+    if (slot < 0) for (int i = 0; i < g_max_udp_sessions; i++) if (!g_sessions[i].alive) { slot = i; break; }
     if (slot < 0) return NULL;
 
     udp_session_t* s = &g_sessions[slot];
@@ -438,6 +439,8 @@ int main(int argc, char** argv) {
     }
     log_set_level((log_level_t)lvl);
 
+    g_max_udp_sessions = (int)g_cfg.max_udp_sessions;
+
     config_token_to_bytes(g_cfg.token, g_token, OTPE_TOKEN_SIZE);
 
     FILE* certf = fopen(g_cfg.client_cert_file, "r");
@@ -482,6 +485,7 @@ int main(int argc, char** argv) {
     log_info("  CA file: %s", g_cfg.ca_file);
     log_info("  Client cert: %s", g_cfg.client_cert_file);
     log_info("  TLS retries: %d", TLS_MAX_RETRIES);
+    log_info("  Max UDP sessions: %d", g_max_udp_sessions);
     log_info("  Log level: %s", log_level_to_string(log_get_level()));
 
     pthread_t udp_tid;

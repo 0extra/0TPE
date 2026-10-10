@@ -1,5 +1,6 @@
 USE_BORINGSSL ?= 1
 BORINGSSL_DIR ?= /opt/boringssl
+SANITIZE ?= 0
 
 CC = gcc
 CFLAGS  = -Wall -Wextra -O2 -Iinclude -g
@@ -18,6 +19,13 @@ else
     LIBS    := -lssl -lcrypto $(LIBS)
 endif
 
+SAN_FLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer
+
+ifeq ($(SANITIZE),1)
+    CFLAGS  += $(SAN_FLAGS) -g -O1
+    LDFLAGS += $(SAN_FLAGS)
+endif
+
 FUZZ_CC = clang
 FUZZ_CFLAGS = -fsanitize=fuzzer,address,undefined -Iinclude -g -O1
 
@@ -32,6 +40,7 @@ SRC_TEST_UDP    = tests/test_udp.c
 SRC_TEST_UDP_STRESS = tests/test_udp_stress.c
 SRC_BENCH_THROUGHPUT = bench/throughput.c $(SRC_COMMON)
 SRC_BENCH_RTT = bench/rtt.c $(SRC_COMMON)
+SRC_BENCH_CONN = bench/conn.c $(SRC_COMMON)
 
 all: otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-crypto otpe-test-udp otpe-test-udp-stress
 
@@ -65,10 +74,13 @@ bench-rtt: $(SRC_BENCH_RTT)
 bench-throughput: $(SRC_BENCH_THROUGHPUT)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
-bench: bench-rtt bench-throughput
+bench-conn: $(SRC_BENCH_CONN)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
+
+bench: bench-rtt bench-throughput bench-conn
 
 release: all bench
-	strip --strip-all otpe-server otpe-client otpe-genlink otpe-ping bench-rtt bench-throughput
+	strip --strip-all otpe-server otpe-client otpe-genlink otpe-ping bench-rtt bench-throughput bench-conn
 
 fuzz: fuzz/fuzz_clienthello.c src/common/tls_peek.c
 	$(FUZZ_CC) $(FUZZ_CFLAGS) -o fuzz/fuzz_clienthello fuzz/fuzz_clienthello.c src/common/tls_peek.c
@@ -80,11 +92,20 @@ fuzz-run: fuzz
 test: all
 	./tests/run_all.sh
 
+sanitize:
+	$(MAKE) clean
+	$(MAKE) SANITIZE=1 all
+
+sanitize-run: sanitize
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=1 \
+	UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+	./tests/run_all.sh
+
 clean:
-	rm -f otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-crypto otpe-test-udp otpe-test-udp-stress bench-rtt bench-throughput fuzz/fuzz_clienthello
+	rm -f otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-crypto otpe-test-udp otpe-test-udp-stress bench-rtt bench-throughput bench-conn fuzz/fuzz_clienthello
 
 fuzz-clean:
 	rm -f fuzz/fuzz_clienthello
 	rm -rf fuzz/corpus
 
-.PHONY: all clean fuzz fuzz-run fuzz-clean bench release test
+.PHONY: all clean fuzz fuzz-run fuzz-clean bench release test sanitize sanitize-run

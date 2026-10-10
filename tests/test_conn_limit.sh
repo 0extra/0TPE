@@ -22,7 +22,12 @@ EOF
 
 echo "=== Connection limit test (max=$MAX, port=$PORT) ==="
 
-stdbuf -oL -eL ./otpe-server "$CONF" > "$LOG" 2>&1 &
+STDBUF=""
+if [ -z "${ASAN_OPTIONS:-}" ]; then
+    STDBUF="stdbuf -oL -eL"
+fi
+
+$STDBUF ./otpe-server "$CONF" > "$LOG" 2>&1 &
 SERVER_PID=$!
 sleep 0.7
 

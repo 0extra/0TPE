@@ -100,11 +100,17 @@ pkill -9 otpe-server 2>/dev/null
 pkill -9 otpe-client 2>/dev/null
 sleep 0.3
 
-stdbuf -oL -eL ./otpe-server 0tpe.conf > /tmp/otpe-server.log 2>&1 &
+# ASan and stdbuf both use LD_PRELOAD and conflict; skip stdbuf when sanitizing
+STDBUF=""
+if [ -z "${ASAN_OPTIONS:-}" ]; then
+    STDBUF="stdbuf -oL -eL"
+fi
+
+$STDBUF ./otpe-server 0tpe.conf > /tmp/otpe-server.log 2>&1 &
 SERVER_PID=$!
 sleep 0.5
 
-stdbuf -oL -eL ./otpe-client 0tpe.conf > /tmp/otpe-client.log 2>&1 &
+$STDBUF ./otpe-client 0tpe.conf > /tmp/otpe-client.log 2>&1 &
 CLIENT_PID=$!
 sleep 0.5
 

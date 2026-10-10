@@ -30,12 +30,16 @@ A lightweight transport protocol over TLS with camouflage to a real website.
 - DNS cache (30-second TTL, 256 hosts)
 - 10-second idle timeout in relay
 - Config file — change ports/SNI without recompiling
-- Config validation at startup — readable certs, port conflicts, token format
+- **Config validation at startup** — readable certs, port conflicts, token format
+- **Log levels** — `debug`, `info`, `warn`, `error` (configurable)
+- **Connection limits** — `max_connections` (server), `max_udp_sessions` (client)
 - IPv4 + IPv6 with automatic fallback
 - Link generator (`otpe://...`)
 - Fuzz-tested ClientHello parser
-- UDP echo stress test — 250 queries, 0% loss on loopback
-- GitHub Actions CI
+- **UDP echo stress test** — 250 queries, 0% loss on loopback
+- **Connection benchmark** — connections/sec, CPU, RSS
+- **ASan/UBSan sanitizer builds** — `make sanitize-run`
+- GitHub Actions CI — runs `make test`
 - Docker multi-stage build
 
 ## Benchmarks (loopback)
@@ -54,6 +58,24 @@ avg:  0.028 ms
 ```
 
 28 microseconds average RTT over BoringSSL + 0TPE + relay on loopback.
+
+### Connections per second
+
+8 workers × 25 connections each, loopback:
+
+```
+=== 0TPE connection benchmark ===
+workers:  8
+per worker: 25
+total:    200
+
+ok:       200
+fail:     0
+elapsed:  ~0.06 s
+conn/s:   ~3192
+cpu:      ~185% of wall
+rss:      ~+1.3 MB
+```
 
 ### Parallel connections
 
@@ -128,6 +150,7 @@ Binaries produced:
 - `otpe-test-udp-stress` — 25×10 UDP echo stress test
 - `bench-rtt` — RTT benchmark
 - `bench-throughput` — throughput benchmark
+- `bench-conn` — connections/sec benchmark
 
 ## VPS installation
 
@@ -194,10 +217,12 @@ server_ip        = YOUR_VPS_IP
 server_port      = 8443
 socks_port       = 1080
 http_port        = 8080
+max_udp_sessions = 32
 sni              = www.microsoft.com
 token            = 550e8400e29b41d4a716446655440000
 client_cert_file = certs/client.crt
 client_key_file  = certs/client.key
+log_level        = info
 ```
 
 Run:
@@ -209,12 +234,14 @@ Run:
 You will see:
 
 ```
-0TPE client -> <IP>:8443 (SNI=www.microsoft.com)
-  SOCKS5 on 127.0.0.1:1080
-  HTTP   on 127.0.0.1:8080
-  Client cert: certs/client.crt
-  TLS retries: 3
-  UDP    on 127.0.0.1:<port>
+[INFO] 0TPE client -> <IP>:8443 (SNI=www.microsoft.com)
+[INFO]   SOCKS5 on 127.0.0.1:1080
+[INFO]   HTTP   on 127.0.0.1:8080
+[INFO]   Client cert: certs/client.crt
+[INFO]   TLS retries: 3
+[INFO]   Max UDP sessions: 32
+[INFO]   Log level: info
+[INFO]   UDP    on 127.0.0.1:<port>
 ```
 
 ## Usage
@@ -282,6 +309,20 @@ Settings → Advanced → Connection type → Use custom proxy:
 git -c http.proxy=socks5h://127.0.0.1:1080 clone https://github.com/user/repo.git
 ```
 
+### System-wide proxy
+
+To route **all** system traffic (not just browsers) through 0TPE:
+
+**Option A — `tun2socks` (TCP + UDP):**
+
+Creates a `tun0` interface, routes all traffic through it, forwards to SOCKS5 `127.0.0.1:1080`. Supports UDP (QUIC, DNS, games). See [tun2socks](https://github.com/xjasonlyu/tun2socks).
+
+**Option B — `redsocks` (TCP only):**
+
+Intercepts TCP via iptables, redirects to `127.0.0.1:1080`. Does **not** handle UDP. See [redsocks](https://github.com/darkk/redsocks).
+
+For DNS, use DoH/DoT or ensure UDP is tunneled (tun2socks handles this).
+
 ## Link format
 
 ```bash
@@ -314,6 +355,12 @@ make clean && make
 ./otpe-ping 127.0.0.1 8443 20
 ```
 
+Connection limit test:
+
+```bash
+./tests/test_conn_limit.sh 2 8
+```
+
 Fuzzing:
 
 ```bash
@@ -327,6 +374,13 @@ Benchmarks:
 make bench
 ./bench-rtt 0tpe.conf 1000
 ./bench-throughput 0tpe.conf 100
+./bench-conn 0tpe.conf 8 25
+```
+
+Sanitizers (ASan + UBSan):
+
+```bash
+make sanitize-run
 ```
 
 ## Architecture
@@ -386,19 +440,26 @@ issuer=C=US, O=Microsoft Corporation, CN=Microsoft TLS G2 RSA CA OCSP 04
 
 ### Server logs
 
-- `[tid ...] 0TPE client, SNI=...` — client recognized
-- `[UDP tid ...] -> 8.8.8.8:53 (29 bytes)` — UDP relay working
-- `[fallback] -> www.microsoft.com:443` — unrecognized connection redirected to fallback
-- `[relay] idle timeout (10009 ms no data)` — stuck connection cleaned up
-- `[tid ...] TLS failed (client cert rejected?)` — client certificate not signed by CA
-- `config: <file> not readable: <path>` — a certificate, key, or CA file is missing or unreadable
-- `config: token must be 16 hex chars` — token in `0tpe.conf` is not a valid hex string of at least 16 characters
+Log levels: `debug` (most verbose), `info` (default), `warn`, `error` (least).
+
+- `[INFO] 0TPE client, SNI=...` — client recognized
+- `[WARN] connection limit reached (N), rejecting` — `max_connections` exceeded
+- `[WARN] TLS failed (client cert rejected?)` — client certificate not signed by CA
+- `[INFO] [fallback] -> www.microsoft.com:443` — unrecognized connection redirected
+- `[WARN] [fallback] cannot connect to ...:443` — fallback target unreachable
+- `[DEBUG] TLS OK` — handshake succeeded
+- `[DEBUG] up host:port` — tunnel established
+- `[DEBUG] closed` — tunnel closed
+- `config: <file> not readable: <path>` — a certificate, key, or CA file is missing
+- `config: token must be at least 16 hex chars` — token in `0tpe.conf` is invalid
+- `config: max_connections: out of range (1-65535): N` — limit out of range
+- `config: invalid log_level 'X' (use: debug, info, warn, error)` — unknown log level
 
 ## Project structure
 
 ```
 .github/workflows/   — CI
-bench/               — RTT and throughput benchmarks
+bench/               — RTT, throughput, and connections/sec benchmarks
 certs/               — CA, server, client certificates (generated)
 docs/                — SPEC.md, THREAT_MODEL.md, CODE_AUDIT.md
 fuzz/                — libFuzzer target + corpus
@@ -415,6 +476,7 @@ tests/               — unit, integration, and stress tests (run_all.sh)
 Makefile
 README.md
 LICENSE
+THIRD_PARTY_LICENSES
 ```
 
 ## Name
@@ -423,8 +485,6 @@ LICENSE
 
 ## License
 
-GNU General Public License v3.0, with an OpenSSL/BoringSSL linking
-exception — see [LICENSE](LICENSE).
+GNU General Public License v3.0, with an OpenSSL/BoringSSL linking exception — see [LICENSE](LICENSE).
 
-Third-party license notices are in
-[THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).
+Third-party license notices are in [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES).

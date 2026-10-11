@@ -9,6 +9,7 @@ otpe-test-crypto
 otpe-test-udp
 bench-rtt
 bench-throughput
+otpe-test-udp-stress
 !fuzz/fuzz_clienthello.c
 fuzz/corpus/*
 !fuzz/corpus/.gitkeep

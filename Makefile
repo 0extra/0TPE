@@ -29,20 +29,19 @@ endif
 FUZZ_CC = clang
 FUZZ_CFLAGS = -fsanitize=fuzzer,address,undefined -Iinclude -g -O1
 
-SRC_COMMON = src/common/protocol.c src/common/relay.c src/common/tls.c src/common/socks5.c src/common/config.c src/common/http_proxy.c src/common/tls_peek.c src/common/crypto.c src/common/dns_cache.c src/common/uri.c src/common/udp_stateful.c src/common/log.c
+SRC_COMMON = src/common/protocol.c src/common/relay.c src/common/tls.c src/common/socks5.c src/common/config.c src/common/http_proxy.c src/common/tls_peek.c src/common/dns_cache.c src/common/uri.c src/common/udp_stateful.c src/common/log.c
 SRC_SERVER = src/server/main.c $(SRC_COMMON)
 SRC_CLIENT = src/client/main.c $(SRC_COMMON)
 SRC_PING   = src/ping/main.c   $(SRC_COMMON)
 SRC_GENLINK = src/tools/genlink.c $(SRC_COMMON)
 SRC_TEST_PROTO  = tests/test_protocol.c $(SRC_COMMON)
-SRC_TEST_CRYPTO = tests/test_crypto.c   $(SRC_COMMON)
 SRC_TEST_UDP    = tests/test_udp.c
 SRC_TEST_UDP_STRESS = tests/test_udp_stress.c
 SRC_BENCH_THROUGHPUT = bench/throughput.c $(SRC_COMMON)
 SRC_BENCH_RTT = bench/rtt.c $(SRC_COMMON)
 SRC_BENCH_CONN = bench/conn.c $(SRC_COMMON)
 
-all: otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-crypto otpe-test-udp otpe-test-udp-stress
+all: otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-udp otpe-test-udp-stress
 
 otpe-server: $(SRC_SERVER)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
@@ -57,9 +56,6 @@ otpe-genlink: $(SRC_GENLINK)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 otpe-test: $(SRC_TEST_PROTO)
-	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
-
-otpe-test-crypto: $(SRC_TEST_CRYPTO)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
 otpe-test-udp: $(SRC_TEST_UDP)
@@ -102,7 +98,7 @@ sanitize-run: sanitize
 	./tests/run_all.sh
 
 clean:
-	rm -f otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-crypto otpe-test-udp otpe-test-udp-stress bench-rtt bench-throughput bench-conn fuzz/fuzz_clienthello
+	rm -f otpe-server otpe-client otpe-ping otpe-genlink otpe-test otpe-test-udp otpe-test-udp-stress bench-rtt bench-throughput bench-conn fuzz/fuzz_clienthello
 
 fuzz-clean:
 	rm -f fuzz/fuzz_clienthello

@@ -141,7 +141,7 @@ int config_load_client(const char* path, otpe_client_config_t* out) {
     out->max_udp_sessions = 32;
     out->idle_timeout_ms = 300000;
     strcpy(out->sni, "www.microsoft.com");
-    strcpy(out->token, "550e8400e29b41d4a716446655440000");
+      snprintf(out->token, sizeof(out->token), "550e8400e29b41d4a716446655440000");
     strcpy(out->ca_file, "certs/ca.crt");
     strcpy(out->client_cert_file, "certs/client.crt");
     strcpy(out->client_key_file, "certs/client.key");

@@ -72,7 +72,7 @@ void otpe_tls_server_preinit(const char* cert_file, const char* key_file,
         return;
     }
 
-    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
     SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
 
     if (SSL_CTX_use_certificate_file(ctx, cert_file, SSL_FILETYPE_PEM) != 1 ||
@@ -141,7 +141,7 @@ void otpe_tls_client_preinit(const char* ca_file) {
         return;
     }
 
-    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+    SSL_CTX_set_min_proto_version(ctx, TLS1_3_VERSION);
 
     if (SSL_CTX_load_verify_locations(ctx, ca_file, NULL) != 1) {
         fprintf(stderr, "[tls] cannot load CA file %s\n", ca_file);
@@ -228,7 +228,10 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni, const char* ca_file) {
     SSL_set_fd(t->ssl, fd);
     if (SSL_connect(t->ssl) != 1) {
         fprintf(stderr, "[tls] server certificate verification failed\n");
-        SSL_free(t->ssl); SSL_CTX_free(t->ctx); free(t); return NULL;
+        SSL_free(t->ssl);
+        if (t->owns_ctx) SSL_CTX_free(t->ctx);
+        free(t); 
+        return NULL;
     }
 
     if (g_use_session_cache) {

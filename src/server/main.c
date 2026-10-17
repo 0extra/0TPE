@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <ctype.h>
 #include "protocol.h"
 #include "relay.h"
 #include "tls.h"
@@ -36,6 +37,12 @@ static int connect_target(const char* host, uint16_t port) {
 
 static void handle_fallback(int client, const char* sni) {
     const char* target_host = (sni && *sni) ? sni : g_cfg.fallback_sni;
+    
+    if (strchr(target_host, ':') != NULL || isdigit((unsigned char)target_host[0])) {
+        log_warn("[fallback] suspicious SNI: %s, using default", target_host);
+        target_host = g_cfg.fallback_sni;
+    }
+
     log_info("[fallback] -> %s:443", target_host);
     int remote = connect_target(target_host, 443);
     if (remote < 0) {
@@ -131,7 +138,7 @@ static void handle_udp_session(otpe_tls_t* tls, const uint8_t* token,
         int tls_ready = otpe_tls_pending(tls) > 0;
         if (!tls_ready) {
             struct pollfd pfd = { .fd = tls_fd, .events = POLLIN };
-            if (poll(&pfd, 1, 30) > 0 && (pfd.revents & POLLIN)) {
+            if (poll(&pfd, 1, 1000) > 0 && (pfd.revents & POLLIN)) {
                 tls_ready = 1;
             }
         }
@@ -171,6 +178,12 @@ static void handle_client(int client) {
 
     log_info("[tid %lu] 0TPE client, SNI=%s",
              (unsigned long)pthread_self(), sni);
+
+    struct timeval tv;
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     otpe_tls_t* tls = otpe_tls_server(client, g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
     if (!tls) {
@@ -319,20 +332,36 @@ int main(int argc, char** argv) {
     otpe_tls_server_preinit(g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
     dns_cache_init();
 
-    int server_sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_sock < 0) return 1;
-    int opt = 1;
-    setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    otpe_tune_socket(server_sock, 1); // 1 = server (TFO)
+    struct addrinfo hints, *res, *p;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
 
-    struct sockaddr_in addr;
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr(g_cfg.listen_ip);
-    addr.sin_port = htons(g_cfg.listen_port);
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", g_cfg.listen_port);
+    
+    if (getaddrinfo(g_cfg.listen_ip[0] ? g_cfg.listen_ip : NULL, port_str, &hints, &res) != 0) {
+        perror("getaddrinfo");
+        return 1;
+    }
 
-    if (bind(server_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind");
+    int server_sock = -1;
+    for (p = res; p != NULL; p = p->ai_next) {
+        server_sock = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (server_sock < 0) continue;
+        
+        int opt = 1;
+        setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+        otpe_tune_socket(server_sock, 1);
+
+        if (bind(server_sock, p->ai_addr, p->ai_addrlen) == 0) break;
         close(server_sock);
+    }
+    freeaddrinfo(res);
+
+    if (!p) {
+        perror("bind");
         return 1;
     }
     if (listen(server_sock, 128) < 0) {

@@ -91,7 +91,6 @@ fi
 
 echo "--- Unit tests ---"
 run_test "protocol round-trip"   ./otpe-test
-run_test "crypto DH"             ./otpe-test-crypto
 
 echo ""
 echo "--- Integration tests ---"
@@ -100,7 +99,6 @@ pkill -9 otpe-server 2>/dev/null
 pkill -9 otpe-client 2>/dev/null
 sleep 0.3
 
-# ASan and stdbuf both use LD_PRELOAD and conflict; skip stdbuf when sanitizing
 STDBUF=""
 if [ -z "${ASAN_OPTIONS:-}" ]; then
     STDBUF="stdbuf -oL -eL"
@@ -136,8 +134,8 @@ fi
 run_test "ping (20 packets)"     ./otpe-ping 127.0.0.1 8443 20
 run_test "UDP end-to-end"        ./otpe-test-udp
 run_test "UDP stress (25x10)"    ./otpe-test-udp-stress
-run_test "HTTP CONNECT"          curl -sS --max-time 20 --proxy http://127.0.0.1:8080 https://example.com -o /dev/null
-run_test "SOCKS5 TCP"            curl -sS --max-time 20 --socks5-hostname 127.0.0.1:1080 https://example.com -o /dev/null
+run_test_retry "HTTP CONNECT"   3 curl -sS --max-time 20 --proxy http://127.0.0.1:8080 https://example.com -o /dev/null
+run_test_retry "SOCKS5 TCP"     3 curl -sS --max-time 20 --socks5-hostname 127.0.0.1:1080 https://example.com -o /dev/null
 run_test "connection limit"      ./tests/test_conn_limit.sh 2 8
 
 echo ""

@@ -124,7 +124,7 @@ int http_connect_handshake(int fd, char* out_host, size_t host_size, uint16_t* o
         fprintf(stderr, "http: bad host/port\n");
         return -1;
     }
-    strcpy(out_host, host);
+    snprintf(out_host, host_size, "%s", host);
     *out_port = port;
 
     for (;;) {

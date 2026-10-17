@@ -95,6 +95,10 @@ int tls_peek_clienthello(int fd, char* sni_out, size_t sni_size, int* has_otpe_a
         if (n > got) { got = n; waited_ms = 0; }
         else { usleep(10000); waited_ms += 10; continue; }
 
+        if (got < 5) continue;
+        uint16_t tls_rec_len = (uint16_t)((buf[3] << 8) | buf[4]);
+        if (got < (ssize_t)(5 + tls_rec_len)) continue; 
+
         if (got < 44) continue;
         uint8_t sid_len = buf[43];
         if (sid_len > 32) return -1;

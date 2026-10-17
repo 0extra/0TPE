@@ -93,6 +93,7 @@ int config_load_server(const char* path, otpe_server_config_t* out) {
     strcpy(out->listen_ip, "0.0.0.0");
     out->listen_port = 8443;
     out->max_connections = 512;
+    out->idle_timeout_ms = 300000;
     strcpy(out->cert_file, "certs/server.crt");
     strcpy(out->key_file, "certs/server.key");
     strcpy(out->ca_file, "certs/ca.crt");
@@ -118,6 +119,9 @@ int config_load_server(const char* path, otpe_server_config_t* out) {
         else if (strcmp(key, "max_connections") == 0) {
             if (parse_u32(value, &out->max_connections, "max_connections", 1, 65535) < 0) { fclose(f); return -1; }
         }
+        else if (strcmp(key, "idle_timeout_ms") == 0) {
+            if (parse_u32(value, &out->idle_timeout_ms, "idle_timeout_ms", 1000, 3600000) < 0) { fclose(f); return -1; }
+        }
         else if (strcmp(key, "cert_file")    == 0) strncpy(out->cert_file,  value, sizeof(out->cert_file) - 1);
         else if (strcmp(key, "key_file")     == 0) strncpy(out->key_file,   value, sizeof(out->key_file) - 1);
         else if (strcmp(key, "ca_file")      == 0) strncpy(out->ca_file,    value, sizeof(out->ca_file) - 1);
@@ -135,6 +139,7 @@ int config_load_client(const char* path, otpe_client_config_t* out) {
     out->socks_port = 1080;
     out->http_port = 8080;
     out->max_udp_sessions = 32;
+    out->idle_timeout_ms = 300000;
     strcpy(out->sni, "www.microsoft.com");
     strcpy(out->token, "550e8400e29b41d4a716446655440000");
     strcpy(out->ca_file, "certs/ca.crt");
@@ -166,6 +171,9 @@ int config_load_client(const char* path, otpe_client_config_t* out) {
         }
         else if (strcmp(key, "max_udp_sessions") == 0) {
             if (parse_u32(value, &out->max_udp_sessions, "max_udp_sessions", 1, 256) < 0) { fclose(f); return -1; }
+        }
+        else if (strcmp(key, "idle_timeout_ms") == 0) {
+            if (parse_u32(value, &out->idle_timeout_ms, "idle_timeout_ms", 1000, 3600000) < 0) { fclose(f); return -1; }
         }
         else if (strcmp(key, "sni")              == 0) strncpy(out->sni, value, sizeof(out->sni) - 1);
         else if (strcmp(key, "token")            == 0) strncpy(out->token, value, sizeof(out->token) - 1);

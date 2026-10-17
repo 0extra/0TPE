@@ -77,7 +77,7 @@ bench-throughput: $(SRC_BENCH_THROUGHPUT)
 bench-conn: $(SRC_BENCH_CONN)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS) $(LIBS)
 
-bench: bench-rtt bench-throughput bench-conn
+bench: all bench-rtt bench-throughput bench-conn
 
 release: all bench
 	strip --strip-all otpe-server otpe-client otpe-genlink otpe-ping bench-rtt bench-throughput bench-conn

@@ -1,5 +1,6 @@
 #include "relay.h"
 #include "dns_cache.h"
+#include "log.h"
 #include <unistd.h>
 #include <poll.h>
 #include <errno.h>
@@ -12,12 +13,38 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 
-#define RELAY_IDLE_TIMEOUT_MS 10000
-#define RELAY_GRACE_TIMEOUT_MS 5000
+#define RELAY_IDLE_TIMEOUT_DEFAULT_MS 300000
+#define RELAY_GRACE_TIMEOUT_DEFAULT_MS 5000
+
+static uint32_t g_relay_idle_timeout_ms = RELAY_IDLE_TIMEOUT_DEFAULT_MS;
+static uint32_t g_relay_grace_timeout_ms = RELAY_GRACE_TIMEOUT_DEFAULT_MS;
+
+void otpe_relay_set_timeouts(uint32_t idle_ms, uint32_t grace_ms) {
+    if (idle_ms >= 1000) g_relay_idle_timeout_ms = idle_ms;
+    if (grace_ms >= 1000) g_relay_grace_timeout_ms = grace_ms;
+}
 
 int otpe_set_tcp_nodelay(int fd) {
     int flag = 1;
     return setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+}
+
+void otpe_tune_socket(int fd, int is_server) {
+    int buf_size = 4 * 1024 * 1024;
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
+    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+
+#ifdef TCP_FASTOPEN
+    int qlen = 5;
+    if (is_server) {
+        setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN, &qlen, sizeof(qlen));
+    } else {
+#ifdef TCP_FASTOPEN_CONNECT
+        int opt = 1;
+        setsockopt(fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &opt, sizeof(opt));
+#endif
+    }
+#endif
 }
 
 static long elapsed_ms_since(struct timespec* start) {
@@ -46,15 +73,15 @@ long otpe_relay_bidirectional(int fd_a, int fd_b) {
         if (a_closed || b_closed) {
             if (grace_start.tv_sec == 0) clock_gettime(CLOCK_MONOTONIC, &grace_start);
             long elapsed = elapsed_ms_since(&grace_start);
-            if (elapsed >= RELAY_GRACE_TIMEOUT_MS) break;
-            timeout_ms = RELAY_GRACE_TIMEOUT_MS - (int)elapsed;
+            if (elapsed >= (long)g_relay_grace_timeout_ms) break;
+            timeout_ms = (int)g_relay_grace_timeout_ms - (int)elapsed;
         } else {
             long idle = elapsed_ms_since(&last_activity);
-            if (idle >= RELAY_IDLE_TIMEOUT_MS) {
-                fprintf(stderr, "[relay] idle timeout (%ld ms no data)\n", idle);
+            if (idle >= (long)g_relay_idle_timeout_ms) {
+                log_debug("[relay] idle timeout (%ld ms no data)", idle);
                 break;
             }
-            timeout_ms = RELAY_IDLE_TIMEOUT_MS - (int)idle;
+            timeout_ms = (int)g_relay_idle_timeout_ms - (int)idle;
         }
 
         int ready = poll(fds, 2, timeout_ms);
@@ -123,15 +150,15 @@ long otpe_relay_tls_bidirectional(otpe_tls_t* tls, int raw_fd) {
         if (tls_closed || raw_closed) {
             if (grace_start.tv_sec == 0) clock_gettime(CLOCK_MONOTONIC, &grace_start);
             long elapsed = elapsed_ms_since(&grace_start);
-            if (elapsed >= RELAY_GRACE_TIMEOUT_MS) break;
-            timeout_ms = RELAY_GRACE_TIMEOUT_MS - (int)elapsed;
+            if (elapsed >= (long)g_relay_grace_timeout_ms) break;
+            timeout_ms = (int)g_relay_grace_timeout_ms - (int)elapsed;
         } else {
             long idle = elapsed_ms_since(&last_activity);
-            if (idle >= RELAY_IDLE_TIMEOUT_MS) {
-                fprintf(stderr, "[relay] idle timeout (%ld ms no data)\n", idle);
+            if (idle >= (long)g_relay_idle_timeout_ms) {
+                log_debug("[relay] idle timeout (%ld ms no data)", idle);
                 break;
             }
-            timeout_ms = RELAY_IDLE_TIMEOUT_MS - (int)idle;
+            timeout_ms = (int)g_relay_idle_timeout_ms - (int)idle;
         }
 
         int ready = poll(fds, 2, timeout_ms);
@@ -221,13 +248,19 @@ int otpe_connect_timeout(const char* host, uint16_t port) {
     for (struct addrinfo* p = res; p; p = p->ai_next) {
         if (p->ai_family != AF_INET) continue;
         fd = try_connect_one(p, 500);
-        if (fd >= 0) return fd;
+        if (fd >= 0) {
+            otpe_tune_socket(fd, 0); // 0 = client
+            return fd;
+        }
     }
 
     for (struct addrinfo* p = res; p; p = p->ai_next) {
         if (p->ai_family != AF_INET6) continue;
         fd = try_connect_one(p, v6_timeout);
-        if (fd >= 0) break;
+        if (fd >= 0) {
+            otpe_tune_socket(fd, 0);
+            break;
+        }
     }
 
     return fd;

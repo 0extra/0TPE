@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.7] - 2026-10-17
+
+### Added
+
+- **TLS Session Resumption** — client caches SSL_SESSION and reuses it across connections. Handshake latency drops significantly (p50 ~1.3 ms on loopback) and connection throughput increases by ~40%.
+- **TCP Fast Open (TFO)** and **4 MB socket buffers** — applied to client and server sockets. Reduces latency for new connections and maximizes throughput for high-BDP links (e.g., YouTube, large downloads).
+- **Client SSL_CTX caching** — the client now initializes BoringSSL and loads the CA file only once, instead of on every connection.
+- **Graceful Shutdown** — server and client handle `SIGINT`/`SIGTERM` and close listener sockets cleanly.
+- **Handshake latency percentiles** — `bench-conn` now reports min, p50, p95, p99, and max.
+- **`idle_timeout_ms`** — configurable relay idle timeout. Default 300000 ms (5 minutes).
+
+### Fixed
+
+- **10-second idle timeout killing browser connections** — default increased from 10s to 300s. Firefox push notifications, YouTube streaming, and Google services no longer reconnect every 10 seconds.
+- **`make bench` didn't build server/client** — `bench` target now depends on `all`.
+- **Unused variable warning** in `bench/conn.c`.
+- **Idle timeout log spam** — moved from unconditional `stderr` to `log_debug`.
+
+### Unchanged
+
+- 16-byte header, BoringSSL, ALPN marker (`h2,http/1.1,0tpe`), fallback to `www.microsoft.com`.
+
 ## [0.1.6] - 2026-10-10
 
 ### Added

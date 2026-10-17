@@ -8,6 +8,7 @@ typedef struct {
     char     listen_ip[64];
     uint16_t listen_port;
     uint32_t max_connections;
+    uint32_t idle_timeout_ms;
     char     cert_file[256];
     char     key_file[256];
     char     ca_file[256];
@@ -21,6 +22,7 @@ typedef struct {
     uint16_t socks_port;
     uint16_t http_port;
     uint32_t max_udp_sessions;
+    uint32_t idle_timeout_ms;
     char     sni[256];
     char     token[64];
     char     ca_file[256];

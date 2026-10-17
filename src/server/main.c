@@ -23,6 +23,12 @@
 static otpe_server_config_t g_cfg;
 static int g_active_connections = 0;
 static pthread_mutex_t g_conn_lock = PTHREAD_MUTEX_INITIALIZER;
+static volatile sig_atomic_t g_shutdown = 0;
+
+static void handle_signal(int sig) {
+    (void)sig;
+    g_shutdown = 1;
+}
 
 static int connect_target(const char* host, uint16_t port) {
     return otpe_connect_timeout(host, port);
@@ -300,7 +306,15 @@ int main(int argc, char** argv) {
     }
     log_set_level((log_level_t)lvl);
 
+    otpe_relay_set_timeouts(g_cfg.idle_timeout_ms, 5000);
+
     signal(SIGPIPE, SIG_IGN);
+    
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_signal;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
     otpe_tls_init();
     otpe_tls_server_preinit(g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
     dns_cache_init();
@@ -309,6 +323,7 @@ int main(int argc, char** argv) {
     if (server_sock < 0) return 1;
     int opt = 1;
     setsockopt(server_sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    otpe_tune_socket(server_sock, 1); // 1 = server (TFO)
 
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
@@ -330,13 +345,17 @@ int main(int argc, char** argv) {
     log_info("Fallback SNI: %s", g_cfg.fallback_sni);
     log_info("Client cert required (CA: %s)", g_cfg.ca_file);
     log_info("Max connections: %u", g_cfg.max_connections);
+    log_info("Idle timeout: %u ms", g_cfg.idle_timeout_ms);
     log_info("Log level: %s", log_level_to_string(log_get_level()));
 
-    for (;;) {
+    while (!g_shutdown) {
         struct sockaddr_in caddr;
         socklen_t clen = sizeof(caddr);
         int client = accept(server_sock, (struct sockaddr*)&caddr, &clen);
-        if (client < 0) continue;
+        if (client < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
 
         pthread_mutex_lock(&g_conn_lock);
         if (g_active_connections >= (int)g_cfg.max_connections) {
@@ -358,6 +377,8 @@ int main(int argc, char** argv) {
         }
         pthread_detach(t);
     }
+    
+    log_info("Shutting down server...");
     close(server_sock);
     return 0;
 }

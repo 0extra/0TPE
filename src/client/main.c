@@ -33,8 +33,13 @@ static X509* g_client_cert = NULL;
 static EVP_PKEY* g_client_key = NULL;
 static uint16_t g_udp_port = 0;
 static int g_udp_socket = -1;
-static volatile int g_shutdown = 0;
+static volatile sig_atomic_t g_shutdown = 0;
 static int g_max_udp_sessions = 32;
+
+static void handle_signal(int sig) {
+    (void)sig;
+    g_shutdown = 1;
+}
 
 static int connect_server(void) {
     int sock = otpe_connect_timeout(g_cfg.server_ip, g_cfg.server_port);
@@ -441,6 +446,8 @@ int main(int argc, char** argv) {
 
     g_max_udp_sessions = (int)g_cfg.max_udp_sessions;
 
+    otpe_relay_set_timeouts(g_cfg.idle_timeout_ms, 5000);
+
     config_token_to_bytes(g_cfg.token, g_token, OTPE_TOKEN_SIZE);
 
     FILE* certf = fopen(g_cfg.client_cert_file, "r");
@@ -468,8 +475,17 @@ int main(int argc, char** argv) {
     }
 
     otpe_tls_set_client_cert(g_client_cert, g_client_key);
+    otpe_tls_enable_client_session_cache(1);
+    otpe_tls_client_preinit(g_cfg.ca_file);
 
     signal(SIGPIPE, SIG_IGN);
+    
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = handle_signal;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
     otpe_tls_init();
     dns_cache_init();
 
@@ -486,6 +502,7 @@ int main(int argc, char** argv) {
     log_info("  Client cert: %s", g_cfg.client_cert_file);
     log_info("  TLS retries: %d", TLS_MAX_RETRIES);
     log_info("  Max UDP sessions: %d", g_max_udp_sessions);
+    log_info("  Idle timeout: %u ms", g_cfg.idle_timeout_ms);
     log_info("  Log level: %s", log_level_to_string(log_get_level()));
 
     pthread_t udp_tid;

@@ -20,6 +20,17 @@ static pthread_once_t ssl_once = PTHREAD_ONCE_INIT;
 static void* g_client_cert = NULL;
 static void* g_client_key = NULL;
 
+static int g_use_session_cache = 0;
+static SSL_SESSION* g_cached_session = NULL;
+static pthread_mutex_t g_session_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static SSL_CTX* g_client_ctx = NULL;
+static pthread_mutex_t g_client_ctx_lock = PTHREAD_MUTEX_INITIALIZER;
+
+void otpe_tls_enable_client_session_cache(int enable) {
+    g_use_session_cache = enable;
+}
+
 static void ssl_init_fn(void) {
 #ifdef OPENSSL_IS_BORINGSSL
     (void)0;
@@ -116,45 +127,49 @@ otpe_tls_t* otpe_tls_server(int fd, const char* cert_file, const char* key_file,
     return t;
 }
 
-otpe_tls_t* otpe_tls_client(int fd, const char* sni, const char* ca_file) {
+void otpe_tls_client_preinit(const char* ca_file) {
     ensure_openssl();
-    otpe_tls_t* t = calloc(1, sizeof(*t));
-    if (!t) return NULL;
-
-    t->ctx = SSL_CTX_new(TLS_client_method());
-    if (!t->ctx) { free(t); return NULL; }
-    t->owns_ctx = 1;
-
-    SSL_CTX_set_min_proto_version(t->ctx, TLS1_2_VERSION);
-
-    if (SSL_CTX_load_verify_locations(t->ctx, ca_file, NULL) != 1) {
-        fprintf(stderr, "[tls] cannot load CA file %s\n", ca_file);
-        SSL_CTX_free(t->ctx);
-        free(t);
-        return NULL;
+    pthread_mutex_lock(&g_client_ctx_lock);
+    if (g_client_ctx) {
+        pthread_mutex_unlock(&g_client_ctx_lock);
+        return;
     }
 
-    SSL_CTX_set_verify(t->ctx, SSL_VERIFY_PEER, NULL);
-    SSL_CTX_set_verify_depth(t->ctx, 4);
+    SSL_CTX* ctx = SSL_CTX_new(TLS_client_method());
+    if (!ctx) {
+        pthread_mutex_unlock(&g_client_ctx_lock);
+        return;
+    }
 
-    SSL_CTX_set1_groups_list(t->ctx, "X25519:P-256:P-384");
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+
+    if (SSL_CTX_load_verify_locations(ctx, ca_file, NULL) != 1) {
+        fprintf(stderr, "[tls] cannot load CA file %s\n", ca_file);
+        SSL_CTX_free(ctx);
+        pthread_mutex_unlock(&g_client_ctx_lock);
+        return;
+    }
+
+    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+    SSL_CTX_set_verify_depth(ctx, 4);
+    SSL_CTX_set1_groups_list(ctx, "X25519:P-256:P-384");
 
 #ifdef OPENSSL_IS_BORINGSSL
-    SSL_CTX_set_cipher_list(t->ctx,
+    SSL_CTX_set_cipher_list(ctx,
         "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:"
         "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
         "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
         "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305");
 #else
-    SSL_CTX_set_ciphersuites(t->ctx,
+    SSL_CTX_set_ciphersuites(ctx,
         "TLS_AES_256_GCM_SHA384:TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256");
-    SSL_CTX_set_cipher_list(t->ctx,
+    SSL_CTX_set_cipher_list(ctx,
         "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
         "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
         "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305");
 #endif
 
-    SSL_CTX_set1_sigalgs_list(t->ctx,
+    SSL_CTX_set1_sigalgs_list(ctx,
         "ecdsa_secp256r1_sha256:rsa_pss_rsae_sha256:rsa_pkcs1_sha256:"
         "ecdsa_secp384r1_sha384:rsa_pss_rsae_sha384:rsa_pkcs1_sha384:"
         "rsa_pss_rsae_sha512:rsa_pkcs1_sha512");
@@ -164,19 +179,50 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni, const char* ca_file) {
         8, 'h', 't', 't', 'p', '/', '1', '.', '1',
         4, '0', 't', 'p', 'e'
     };
-    SSL_CTX_set_alpn_protos(t->ctx, alpn_list, sizeof(alpn_list));
+    SSL_CTX_set_alpn_protos(ctx, alpn_list, sizeof(alpn_list));
 
     if (g_client_cert && g_client_key) {
-        SSL_CTX_use_certificate(t->ctx, (X509*)g_client_cert);
-        SSL_CTX_use_PrivateKey(t->ctx, (EVP_PKEY*)g_client_key);
+        SSL_CTX_use_certificate(ctx, (X509*)g_client_cert);
+        SSL_CTX_use_PrivateKey(ctx, (EVP_PKEY*)g_client_key);
     }
 
-    t->ssl = SSL_new(t->ctx);
-    if (!t->ssl) { SSL_CTX_free(t->ctx); free(t); return NULL; }
+    g_client_ctx = ctx;
+    pthread_mutex_unlock(&g_client_ctx_lock);
+}
+
+otpe_tls_t* otpe_tls_client(int fd, const char* sni, const char* ca_file) {
+    ensure_openssl();
+
+    pthread_mutex_lock(&g_client_ctx_lock);
+    if (!g_client_ctx) {
+        pthread_mutex_unlock(&g_client_ctx_lock);
+        otpe_tls_client_preinit(ca_file);
+        pthread_mutex_lock(&g_client_ctx_lock);
+    }
+    SSL_CTX* ctx = g_client_ctx;
+    pthread_mutex_unlock(&g_client_ctx_lock);
+
+    if (!ctx) return NULL;
+
+    otpe_tls_t* t = calloc(1, sizeof(*t));
+    if (!t) return NULL;
+
+    t->ctx = ctx;
+    t->owns_ctx = 0;
+    t->ssl = SSL_new(ctx);
+    if (!t->ssl) { free(t); return NULL; }
 
     if (sni && *sni) {
         SSL_set_tlsext_host_name(t->ssl, sni);
         SSL_set1_host(t->ssl, sni);
+    }
+
+    if (g_use_session_cache) {
+        pthread_mutex_lock(&g_session_lock);
+        if (g_cached_session) {
+            SSL_set_session(t->ssl, g_cached_session);
+        }
+        pthread_mutex_unlock(&g_session_lock);
     }
 
     SSL_set_fd(t->ssl, fd);
@@ -184,6 +230,14 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni, const char* ca_file) {
         fprintf(stderr, "[tls] server certificate verification failed\n");
         SSL_free(t->ssl); SSL_CTX_free(t->ctx); free(t); return NULL;
     }
+
+    if (g_use_session_cache) {
+        pthread_mutex_lock(&g_session_lock);
+        if (g_cached_session) SSL_SESSION_free(g_cached_session);
+        g_cached_session = SSL_get1_session(t->ssl);
+        pthread_mutex_unlock(&g_session_lock);
+    }
+
     return t;
 }
 

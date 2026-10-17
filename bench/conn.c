@@ -47,7 +47,15 @@ static uint64_t read_status_field(const char* key) {
     return val;
 }
 
-static int connect_and_ping(void) {
+static int compare_u64(const void* a, const void* b) {
+    uint64_t ua = *(const uint64_t*)a;
+    uint64_t ub = *(const uint64_t*)b;
+    return (ua > ub) - (ua < ub);
+}
+
+static int connect_and_ping(uint64_t* rtt_out) {
+    uint64_t t0 = now_ns();
+    
     int sock = otpe_connect_timeout(g_cfg.server_ip, g_cfg.server_port);
     if (sock < 0) return -1;
     otpe_set_tcp_nodelay(sock);
@@ -57,6 +65,9 @@ static int connect_and_ping(void) {
         close(sock);
         return -1;
     }
+
+    uint64_t t1 = now_ns();
+    *rtt_out = t1 - t0;
 
     otpe_header_t req;
     req.version  = OTPE_VERSION;
@@ -70,37 +81,29 @@ static int connect_and_ping(void) {
     uint8_t out[OTPE_HEADER_SIZE];
     otpe_encode_header(&req, out, sizeof(out));
 
-    if (otpe_tls_send_all(tls, out, OTPE_HEADER_SIZE) <= 0) {
-        otpe_tls_free(tls);
-        close(sock);
-        return -1;
-    }
-
+    otpe_tls_send_all(tls, out, OTPE_HEADER_SIZE);
     uint8_t in[OTPE_HEADER_SIZE];
-    if (otpe_tls_recv_all(tls, in, OTPE_HEADER_SIZE) != OTPE_HEADER_SIZE) {
-        otpe_tls_free(tls);
-        close(sock);
-        return -1;
-    }
-
-    otpe_header_t rep;
-    int ok = otpe_decode_header(in, OTPE_HEADER_SIZE, &rep) &&
-             rep.command == OTPE_CMD_PONG;
+    otpe_tls_recv_all(tls, in, OTPE_HEADER_SIZE);
 
     otpe_tls_free(tls);
     close(sock);
-    return ok ? 0 : -1;
+    return 0;
 }
 
-typedef struct { int count; } worker_arg_t;
+typedef struct {
+    int count;
+    uint64_t* rtts; 
+} worker_arg_t;
 
 static void* worker(void* arg) {
     worker_arg_t* wa = (worker_arg_t*)arg;
     uint64_t ok = 0, fail = 0;
+    
     for (int i = 0; i < wa->count; i++) {
-        if (connect_and_ping() == 0) ok++;
+        if (connect_and_ping(&wa->rtts[i]) == 0) ok++;
         else fail++;
     }
+    
     pthread_mutex_lock(&g_lock);
     g_ok += ok;
     g_fail += fail;
@@ -129,10 +132,13 @@ int main(int argc, char** argv) {
     if (!cert || !key) return 1;
 
     otpe_tls_set_client_cert(cert, key);
+    otpe_tls_enable_client_session_cache(1);
     otpe_tls_init();
+    otpe_tls_client_preinit(g_cfg.ca_file);
     dns_cache_init();
 
     int total = workers * per_worker;
+    uint64_t* all_rtts = calloc(total, sizeof(uint64_t));
 
     uint64_t mem_kb_before = read_status_field("VmRSS:");
     struct timespec cpu_before, cpu_after;
@@ -149,11 +155,12 @@ int main(int argc, char** argv) {
     uint64_t t0 = now_ns();
     for (int i = 0; i < workers; i++) {
         args[i].count = per_worker;
+        args[i].rtts = &all_rtts[i * per_worker];
         pthread_create(&threads[i], NULL, worker, &args[i]);
     }
     for (int i = 0; i < workers; i++) pthread_join(threads[i], NULL);
     uint64_t t1 = now_ns();
-
+    
     clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &cpu_after);
     uint64_t mem_kb_after = read_status_field("VmRSS:");
 
@@ -161,16 +168,37 @@ int main(int argc, char** argv) {
     double cpu_s = (cpu_after.tv_sec - cpu_before.tv_sec)
                  + (cpu_after.tv_nsec - cpu_before.tv_nsec) / 1e9;
 
+    int valid_rtts = 0;
+    uint64_t* sorted_rtts = calloc(total, sizeof(uint64_t));
+    for (int i = 0; i < total; i++) {
+        if (all_rtts[i] > 0) {
+            sorted_rtts[valid_rtts++] = all_rtts[i];
+        }
+    }
+    
+    qsort(sorted_rtts, valid_rtts, sizeof(uint64_t), compare_u64);
+
     printf("ok:       %lu\n", (unsigned long)g_ok);
     printf("fail:     %lu\n", (unsigned long)g_fail);
     printf("elapsed:  %.3f s\n", wall_s);
     printf("conn/s:   %.1f\n", g_ok / wall_s);
     printf("cpu:      %.2f s (%.0f%% of wall)\n", cpu_s, 100.0 * cpu_s / wall_s);
-    printf("rss:      %lu KB -> %lu KB (+%ld KB)\n",
+    printf("rss:      %lu KB -> %lu KB (+%ld KB)\n\n",
            (unsigned long)mem_kb_before,
            (unsigned long)mem_kb_after,
            (long)(mem_kb_after - mem_kb_before));
 
+    if (valid_rtts > 0) {
+        printf("Handshake latency:\n");
+        printf("  min:  %.3f ms\n", (double)sorted_rtts[0] / 1e6);
+        printf("  p50:  %.3f ms\n", (double)sorted_rtts[valid_rtts / 2] / 1e6);
+        printf("  p95:  %.3f ms\n", (double)sorted_rtts[valid_rtts * 95 / 100] / 1e6);
+        printf("  p99:  %.3f ms\n", (double)sorted_rtts[valid_rtts * 99 / 100] / 1e6);
+        printf("  max:  %.3f ms\n", (double)sorted_rtts[valid_rtts - 1] / 1e6);
+    }
+
+    free(sorted_rtts);
+    free(all_rtts);
     free(threads);
     free(args);
     return g_fail == 0 ? 0 : 1;

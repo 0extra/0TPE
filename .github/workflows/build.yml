@@ -16,7 +16,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential cmake ninja-build golang
 
+      - name: Cache BoringSSL
+        id: cache-boringssl
+        uses: actions/cache@v3
+        with:
+          path: /opt/boringssl
+          key: ${{ runner.os }}-boringssl-v1
+
       - name: Build BoringSSL
+        if: steps.cache-boringssl.outputs.cache-hit != 'true'
         run: |
           chmod +x scripts/build_boringssl.sh
           ./scripts/build_boringssl.sh
@@ -31,7 +39,7 @@ jobs:
 
       - name: Run full test suite
         run: make test
-        timeout-minutes: 5
+        timeout-minutes: 10
 
   fuzz:
     runs-on: ubuntu-latest

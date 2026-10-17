@@ -15,7 +15,7 @@ static int has_otpe_in_alpn(const uint8_t* p, size_t len) {
     while (pos + 1 < len && pos < (size_t)(2 + list_len)) {
         uint8_t alen = p[pos];
         if (pos + 1 + alen > len) return 0;
-        if (alen == 4 && memcmp(p + pos + 1, "0tpe", 4) == 0) return 1;
+        if (alen == 2 && memcmp(p + pos + 1, "h3", 2) == 0) return 1;
         pos += 1 + alen;
     }
     return 0;
@@ -97,7 +97,7 @@ int tls_peek_clienthello(int fd, char* sni_out, size_t sni_size, int* has_otpe_a
 
         if (got < 5) continue;
         uint16_t tls_rec_len = (uint16_t)((buf[3] << 8) | buf[4]);
-        if (got < (ssize_t)(5 + tls_rec_len)) continue; 
+        if (got < (ssize_t)(5 + tls_rec_len)) continue;
 
         if (got < 44) continue;
         uint8_t sid_len = buf[43];

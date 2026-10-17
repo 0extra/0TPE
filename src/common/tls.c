@@ -27,10 +27,6 @@ static pthread_mutex_t g_session_lock = PTHREAD_MUTEX_INITIALIZER;
 static SSL_CTX* g_client_ctx = NULL;
 static pthread_mutex_t g_client_ctx_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void otpe_tls_enable_client_session_cache(int enable) {
-    g_use_session_cache = enable;
-}
-
 static void ssl_init_fn(void) {
 #ifdef OPENSSL_IS_BORINGSSL
     (void)0;
@@ -48,6 +44,10 @@ void otpe_tls_init(void) {
 void otpe_tls_set_client_cert(void* cert, void* key) {
     g_client_cert = cert;
     g_client_key = key;
+}
+
+void otpe_tls_enable_client_session_cache(int enable) {
+    g_use_session_cache = enable;
 }
 
 static void ensure_openssl(void) {
@@ -127,6 +127,33 @@ otpe_tls_t* otpe_tls_server(int fd, const char* cert_file, const char* key_file,
     return t;
 }
 
+static void load_session_from_disk(void) {
+    FILE* f = fopen("tls_session.bin", "rb");
+    if (!f) return;
+    unsigned char buf[4096];
+    size_t len = fread(buf, 1, sizeof(buf), f);
+    fclose(f);
+    if (len > 0) {
+        const unsigned char* p = buf;
+        g_cached_session = d2i_SSL_SESSION(NULL, &p, len);
+    }
+}
+
+static void save_session_to_disk(SSL_SESSION* session) {
+    if (!session) return;
+    int len = i2d_SSL_SESSION(session, NULL);
+    if (len <= 0 || len > 4096) return;
+    unsigned char* buf = malloc(len);
+    unsigned char* p = buf;
+    i2d_SSL_SESSION(session, &p);
+    FILE* f = fopen("tls_session.bin", "wb");
+    if (f) {
+        fwrite(buf, 1, len, f);
+        fclose(f);
+    }
+    free(buf);
+}
+
 void otpe_tls_client_preinit(const char* ca_file) {
     ensure_openssl();
     pthread_mutex_lock(&g_client_ctx_lock);
@@ -177,7 +204,7 @@ void otpe_tls_client_preinit(const char* ca_file) {
     static const uint8_t alpn_list[] = {
         2, 'h', '2',
         8, 'h', 't', 't', 'p', '/', '1', '.', '1',
-        4, '0', 't', 'p', 'e'
+        2, 'h', '3'
     };
     SSL_CTX_set_alpn_protos(ctx, alpn_list, sizeof(alpn_list));
 
@@ -187,6 +214,7 @@ void otpe_tls_client_preinit(const char* ca_file) {
     }
 
     g_client_ctx = ctx;
+    load_session_from_disk();
     pthread_mutex_unlock(&g_client_ctx_lock);
 }
 
@@ -230,14 +258,17 @@ otpe_tls_t* otpe_tls_client(int fd, const char* sni, const char* ca_file) {
         fprintf(stderr, "[tls] server certificate verification failed\n");
         SSL_free(t->ssl);
         if (t->owns_ctx) SSL_CTX_free(t->ctx);
-        free(t); 
+        free(t);
         return NULL;
     }
 
     if (g_use_session_cache) {
         pthread_mutex_lock(&g_session_lock);
-        if (g_cached_session) SSL_SESSION_free(g_cached_session);
-        g_cached_session = SSL_get1_session(t->ssl);
+        if (!SSL_session_reused(t->ssl)) { 
+            if (g_cached_session) SSL_SESSION_free(g_cached_session);
+            g_cached_session = SSL_get1_session(t->ssl);
+            save_session_to_disk(g_cached_session);
+        }
         pthread_mutex_unlock(&g_session_lock);
     }
 

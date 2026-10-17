@@ -30,9 +30,39 @@ int otpe_set_tcp_nodelay(int fd) {
 }
 
 void otpe_tune_socket(int fd, int is_server) {
-    int buf_size = 4 * 1024 * 1024;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &buf_size, sizeof(buf_size));
-    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &buf_size, sizeof(buf_size));
+#ifdef TCP_CONGESTION
+    const char* cc = "bbr";
+    setsockopt(fd, IPPROTO_TCP, TCP_CONGESTION, cc, strlen(cc));
+#endif
+
+#ifdef TCP_NOTSENT_LOWAT
+    unsigned int notsent_lowat = 16384;
+    setsockopt(fd, IPPROTO_TCP, TCP_NOTSENT_LOWAT, &notsent_lowat, sizeof(notsent_lowat));
+#endif
+
+    int keepalive = 1;
+    setsockopt(fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+
+#ifdef TCP_KEEPIDLE
+    int idle = 60;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+#endif
+#ifdef TCP_KEEPINTVL
+    int intvl = 10;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPINTVL, &intvl, sizeof(intvl));
+#endif
+#ifdef TCP_KEEPCNT
+    int cnt = 3;
+    setsockopt(fd, IPPROTO_TCP, TCP_KEEPCNT, &cnt, sizeof(cnt));
+#endif
+#ifdef TCP_USER_TIMEOUT
+    unsigned int timeout = 30000;
+    setsockopt(fd, IPPROTO_TCP, TCP_USER_TIMEOUT, &timeout, sizeof(timeout));
+#endif
+#ifdef TCP_QUICKACK
+    int quickack = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
+#endif
 
 #ifdef TCP_FASTOPEN
     int qlen = 5;
@@ -212,6 +242,7 @@ static int try_connect_one(struct addrinfo* p, int timeout_ms) {
     if (r == 0) {
         int flags = fcntl(fd, F_GETFL, 0);
         fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+        otpe_tune_socket(fd, 0);
         return fd;
     }
     if (errno != EINPROGRESS) {
@@ -235,6 +266,7 @@ static int try_connect_one(struct addrinfo* p, int timeout_ms) {
 
     int flags = fcntl(fd, F_GETFL, 0);
     fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    otpe_tune_socket(fd, 0);
     return fd;
 }
 
@@ -248,19 +280,13 @@ int otpe_connect_timeout(const char* host, uint16_t port) {
     for (struct addrinfo* p = res; p; p = p->ai_next) {
         if (p->ai_family != AF_INET) continue;
         fd = try_connect_one(p, 500);
-        if (fd >= 0) {
-            otpe_tune_socket(fd, 0); // 0 = client
-            return fd;
-        }
+        if (fd >= 0) return fd;
     }
 
     for (struct addrinfo* p = res; p; p = p->ai_next) {
         if (p->ai_family != AF_INET6) continue;
         fd = try_connect_one(p, v6_timeout);
-        if (fd >= 0) {
-            otpe_tune_socket(fd, 0);
-            break;
-        }
+        if (fd >= 0) break;
     }
 
     return fd;

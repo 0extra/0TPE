@@ -138,6 +138,8 @@ static void establish_tunnel(int browser_fd, const char* host, uint16_t port, co
 static void* socks5_thread(void* arg) {
     int fd = (int)(intptr_t)arg;
     otpe_set_tcp_nodelay(fd);
+    otpe_tune_socket(fd, 0);
+    
     uint8_t cmd = 0;
     char host[256] = {0};
     uint16_t port = 0;
@@ -159,6 +161,8 @@ static void* socks5_thread(void* arg) {
 static void* http_thread(void* arg) {
     int fd = (int)(intptr_t)arg;
     otpe_set_tcp_nodelay(fd);
+    otpe_tune_socket(fd, 0);
+    
     char host[256];
     uint16_t port = 0;
     if (http_connect_handshake(fd, host, sizeof(host), &port) < 0) {
@@ -290,7 +294,14 @@ static udp_session_t* udp_find_or_create(struct sockaddr_storage* src, socklen_t
     s->tls_fd = otpe_tls_get_fd(t);
     s->alive = 1;
 
-    if (pthread_create(&s->tid, NULL, udp_session_thread, s) != 0) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 2 * 1024 * 1024);
+    
+    int create_res = pthread_create(&s->tid, &attr, udp_session_thread, s);
+    pthread_attr_destroy(&attr);
+
+    if (create_res != 0) {
         log_error("udp: pthread_create failed");
         s->alive = 0;
         s->in_use = 0;
@@ -399,6 +410,8 @@ static int make_listen(uint16_t port) {
     if (fd < 0) return -1;
     int opt = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    otpe_tune_socket(fd, 1);
+    
     struct sockaddr_in addr;
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -415,16 +428,25 @@ typedef struct {
 
 static void* listener_thread(void* arg) {
     listener_t* l = (listener_t*)arg;
+    
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 2 * 1024 * 1024);
+    
     for (;;) {
         int fd = accept(l->listen_fd, NULL, NULL);
-        if (fd < 0) continue;
+        if (fd < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
         pthread_t t;
-        if (pthread_create(&t, NULL, l->handler, (void*)(intptr_t)fd) != 0) {
+        if (pthread_create(&t, &attr, l->handler, (void*)(intptr_t)fd) != 0) {
             close(fd);
             continue;
         }
         pthread_detach(t);
     }
+    pthread_attr_destroy(&attr);
     return NULL;
 }
 

@@ -7,11 +7,11 @@
 #include <errno.h>
 #include <poll.h>
 #include <time.h>
+#include <ctype.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <ctype.h>
 #include "protocol.h"
 #include "relay.h"
 #include "tls.h"
@@ -21,14 +21,26 @@
 #include "udp_stateful.h"
 #include "log.h"
 
+#define MAX_CONNECTIONS 8192
+
 static otpe_server_config_t g_cfg;
 static int g_active_connections = 0;
 static pthread_mutex_t g_conn_lock = PTHREAD_MUTEX_INITIALIZER;
 static volatile sig_atomic_t g_shutdown = 0;
 
+static int g_conn_queue[MAX_CONNECTIONS];
+static int g_q_head = 0;
+static int g_q_tail = 0;
+static int g_q_count = 0;
+static pthread_mutex_t g_q_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_q_cond = PTHREAD_COND_INITIALIZER;
+
 static void handle_signal(int sig) {
     (void)sig;
     g_shutdown = 1;
+    pthread_mutex_lock(&g_q_lock);
+    pthread_cond_broadcast(&g_q_cond);
+    pthread_mutex_unlock(&g_q_lock);
 }
 
 static int connect_target(const char* host, uint16_t port) {
@@ -56,10 +68,8 @@ static void handle_fallback(int client, const char* sni) {
     close(client);
 }
 
-static void process_udp_payload(udp_target_t* targets,
-                                const uint8_t* payload, size_t len) {
+static void process_udp_payload(udp_target_t* targets, const uint8_t* payload, size_t len) {
     if (len < 1) return;
-
     size_t p = 0;
     uint8_t hlen = payload[p++];
     if (hlen == 0 || p + hlen + 4 > len) return;
@@ -87,8 +97,7 @@ static void process_udp_payload(udp_target_t* targets,
     targets[idx].last_seen = time(NULL);
 }
 
-static int flush_udp_replies(otpe_tls_t* tls, udp_target_t* targets,
-                             const uint8_t* token) {
+static int flush_udp_replies(otpe_tls_t* tls, udp_target_t* targets, const uint8_t* token) {
     uint8_t reply[65540];
     size_t reply_len = 0;
     char reply_host[256];
@@ -138,7 +147,7 @@ static void handle_udp_session(otpe_tls_t* tls, const uint8_t* token,
         int tls_ready = otpe_tls_pending(tls) > 0;
         if (!tls_ready) {
             struct pollfd pfd = { .fd = tls_fd, .events = POLLIN };
-            if (poll(&pfd, 1, 1000) > 0 && (pfd.revents & POLLIN)) {
+            if (poll(&pfd, 1, 100) > 0 && (pfd.revents & POLLIN)) {
                 tls_ready = 1;
             }
         }
@@ -176,8 +185,7 @@ static void handle_client(int client) {
         return;
     }
 
-    log_info("[tid %lu] 0TPE client, SNI=%s",
-             (unsigned long)pthread_self(), sni);
+    log_info("[tid %lu] 0TPE client, SNI=%s", (unsigned long)pthread_self(), sni);
 
     struct timeval tv;
     tv.tv_sec = 5;
@@ -187,11 +195,15 @@ static void handle_client(int client) {
 
     otpe_tls_t* tls = otpe_tls_server(client, g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
     if (!tls) {
-        log_warn("[tid %lu] TLS failed (client cert rejected?)",
-                 (unsigned long)pthread_self());
+        log_warn("[tid %lu] TLS failed (client cert rejected?)", (unsigned long)pthread_self());
         return;
     }
     log_debug("[tid %lu] TLS OK", (unsigned long)pthread_self());
+
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
 
     uint8_t hb[OTPE_HEADER_SIZE];
     if (otpe_tls_recv_all(tls, hb, OTPE_HEADER_SIZE) != OTPE_HEADER_SIZE) {
@@ -255,18 +267,15 @@ static void handle_client(int client) {
         memcpy(host, payload + 2, hlen);
         host[hlen] = '\0';
 
-        log_info("[tid %lu] CONNECT %s:%u",
-                 (unsigned long)pthread_self(), host, port);
+        log_info("[tid %lu] CONNECT %s:%u", (unsigned long)pthread_self(), host, port);
         int target = connect_target(host, port);
         if (target < 0) {
-            log_warn("[tid %lu] cannot connect %s:%u",
-                     (unsigned long)pthread_self(), host, port);
+            log_warn("[tid %lu] cannot connect %s:%u", (unsigned long)pthread_self(), host, port);
             otpe_tls_free(tls);
             return;
         }
         otpe_set_tcp_nodelay(target);
-        log_debug("[tid %lu] up %s:%u",
-                  (unsigned long)pthread_self(), host, port);
+        log_debug("[tid %lu] up %s:%u", (unsigned long)pthread_self(), host, port);
         otpe_relay_tls_bidirectional(tls, target);
         close(target);
         log_debug("[tid %lu] closed", (unsigned long)pthread_self());
@@ -292,25 +301,37 @@ static void handle_client(int client) {
     otpe_tls_free(tls);
 }
 
-static void* thread_entry(void* arg) {
-    int client = (int)(intptr_t)arg;
-    otpe_set_tcp_nodelay(client);
-    handle_client(client);
-    close(client);
-    pthread_mutex_lock(&g_conn_lock);
-    g_active_connections--;
-    pthread_mutex_unlock(&g_conn_lock);
+static void* worker_thread(void* arg) {
+    (void)arg;
+    for (;;) {
+        pthread_mutex_lock(&g_q_lock);
+        while (g_q_count == 0 && !g_shutdown) {
+            pthread_cond_wait(&g_q_cond, &g_q_lock);
+        }
+        if (g_shutdown && g_q_count == 0) {
+            pthread_mutex_unlock(&g_q_lock);
+            break;
+        }
+        int client = g_conn_queue[g_q_head];
+        g_q_head = (g_q_head + 1) % MAX_CONNECTIONS;
+        g_q_count--;
+        pthread_mutex_unlock(&g_q_lock);
+
+        otpe_set_tcp_nodelay(client);
+        handle_client(client);
+        close(client);
+
+        pthread_mutex_lock(&g_conn_lock);
+        g_active_connections--;
+        pthread_mutex_unlock(&g_conn_lock);
+    }
     return NULL;
 }
 
 int main(int argc, char** argv) {
     const char* cfg_path = argc > 1 ? argv[1] : "0tpe.conf";
-    if (config_load_server(cfg_path, &g_cfg) != 0) {
-        return 1;
-    }
-    if (config_validate_server(&g_cfg) != 0) {
-        return 1;
-    }
+    if (config_load_server(cfg_path, &g_cfg) != 0) return 1;
+    if (config_validate_server(&g_cfg) != 0) return 1;
 
     int lvl = log_level_from_string(g_cfg.log_level);
     if (lvl < 0) {
@@ -322,15 +343,30 @@ int main(int argc, char** argv) {
     otpe_relay_set_timeouts(g_cfg.idle_timeout_ms, 5000);
 
     signal(SIGPIPE, SIG_IGN);
-    
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_signal;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+
     otpe_tls_init();
     otpe_tls_server_preinit(g_cfg.cert_file, g_cfg.key_file, g_cfg.ca_file);
     dns_cache_init();
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 2 * 1024 * 1024);
+
+    int num_threads = (int)g_cfg.max_connections;
+    if (num_threads > 2048) num_threads = 2048;
+    
+    for (int i = 0; i < num_threads; i++) {
+        pthread_t t;
+        if (pthread_create(&t, &attr, worker_thread, NULL) == 0) {
+            pthread_detach(t);
+        }
+    }
+    pthread_attr_destroy(&attr);
 
     struct addrinfo hints, *res, *p;
     memset(&hints, 0, sizeof(hints));
@@ -364,7 +400,7 @@ int main(int argc, char** argv) {
         perror("bind");
         return 1;
     }
-    if (listen(server_sock, 128) < 0) {
+    if (listen(server_sock, 1024) < 0) {
         perror("listen");
         close(server_sock);
         return 1;
@@ -396,15 +432,20 @@ int main(int argc, char** argv) {
         g_active_connections++;
         pthread_mutex_unlock(&g_conn_lock);
 
-        pthread_t t;
-        if (pthread_create(&t, NULL, thread_entry, (void*)(intptr_t)client) != 0) {
+        pthread_mutex_lock(&g_q_lock);
+        if (g_q_count == MAX_CONNECTIONS) {
+            pthread_mutex_unlock(&g_q_lock);
             pthread_mutex_lock(&g_conn_lock);
             g_active_connections--;
             pthread_mutex_unlock(&g_conn_lock);
             close(client);
             continue;
         }
-        pthread_detach(t);
+        g_conn_queue[g_q_tail] = client;
+        g_q_tail = (g_q_tail + 1) % MAX_CONNECTIONS;
+        g_q_count++;
+        pthread_cond_signal(&g_q_cond);
+        pthread_mutex_unlock(&g_q_lock);
     }
     
     log_info("Shutting down server...");

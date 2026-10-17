@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.1.8] - 2026-10-18
+
+### Added
+
+- **Thread Pool (Architecture)**: Replaced thread-per-connection with a fixed thread pool (size = max_connections). Drastically reduces CPU overhead and memory fragmentation under high load.
+- **BBR Congestion Control**: Enabled Google's BBR algorithm on all sockets to maximize throughput and eliminate bufferbloat for YouTube/video streaming.
+- **Kernel TCP Tuning**: Added `TCP_NOTSENT_LOWAT` (zero-latency writes), `TCP_QUICKACK`, and aggressive KeepAlive.
+- **Persistent TLS Sessions**: Client saves session tickets to `tls_session.bin`, enabling 0-RTT on restarts.
+
+### Changed
+
+- **ALPN Masquerading**: Replaced the obvious `0tpe` ALPN marker with `h3`. Now the ClientHello looks identical to a standard Chrome browser offering HTTP/3.
+- **TLS 1.3 Enforced**: Dropped TLS 1.2 support. Certificates are now fully encrypted during the handshake.
+- **Memory Optimization**: Reduced thread stack size to 2MB (down from the default 8MB), saving gigabytes of RAM on high-connection counts.
+- **Zero-Copy Buffers**: Removed hardcoded 4MB socket buffers, letting the Linux kernel auto-tune them based on real network conditions.
+
+### Fixed
+
+- **SSL_CTX Double-Free**: Fixed a critical `use-after-free` crash when a client TLS handshake failed.
+- **SSRF in Fallback**: Prevented clients from forcing the server to connect to internal IP addresses (e.g., `127.0.0.1`) via SNI.
+- **DoS via Handshake**: Added a 5-second `SO_RCVTIMEO` to prevent slow-loris attacks during `SSL_accept`.
+- **UDP Timeout**: Fixed a bug where UDP poll loops would drop replies if the poll timed out.
+
+### Removed
+
+- Dead code (`crypto.c`, `nonce_cache.c`) left over from the pre-mTLS era.
+
 ## [0.1.7] - 2026-10-17
 
 ### Added
